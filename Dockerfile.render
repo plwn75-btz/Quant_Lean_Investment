@@ -1,0 +1,47 @@
+# ══════════════════════════════════════════════════════════════════════════
+# Dockerfile.render — Quant-LEAN Engineering Dashboard for Render.com
+# ══════════════════════════════════════════════════════════════════════════
+# Uses QuantConnect's official foundation image (includes .NET SDK + Python)
+# ══════════════════════════════════════════════════════════════════════════
+
+FROM quantconnect/lean:foundation
+
+WORKDIR /app
+
+# 1. Copy backtest_ui first (for Docker layer caching on requirements)
+COPY backtest_ui/ /app/backtest_ui/
+
+# 2. Install Python dependencies for the Flask server
+RUN pip install --no-cache-dir flask flask-cors yfinance pandas
+
+# 3. Copy the rest of the project (algorithm, launcher, config, etc.)
+COPY Algorithm.Python/ /app/Algorithm.Python/
+COPY Launcher/ /app/Launcher/
+COPY Data/ /app/Data/
+COPY Common/ /app/Common/
+COPY Engine/ /app/Engine/
+COPY Algorithm/ /app/Algorithm/
+COPY AlgorithmFactory/ /app/AlgorithmFactory/
+COPY Api/ /app/Api/
+COPY Brokerages/ /app/Brokerages/
+COPY Compression/ /app/Compression/
+COPY Configuration/ /app/Configuration/
+COPY DownloaderDataProvider/ /app/DownloaderDataProvider/
+COPY Indicators/ /app/Indicators/
+COPY Logging/ /app/Logging/
+COPY Messaging/ /app/Messaging/
+COPY Queues/ /app/Queues/
+COPY QuantConnect.Lean.sln /app/
+COPY LocalPackages/ /app/LocalPackages/
+
+# 4. Restore & build the LEAN Launcher project so `dotnet run` works
+RUN dotnet restore Launcher/QuantConnect.Lean.Launcher.csproj && \
+    dotnet build Launcher/QuantConnect.Lean.Launcher.csproj -c Debug --no-restore || \
+    echo "LEAN build skipped (will compile on first backtest run)"
+
+# 5. Render injects PORT at runtime; default to 5000 for local testing
+ENV PORT=5000
+EXPOSE 5000
+
+# 6. Launch the Flask server
+CMD ["python", "backtest_ui/server.py"]

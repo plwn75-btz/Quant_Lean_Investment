@@ -281,3 +281,21 @@ Research/Notebooks
 #Docker result files
 Results/
 QuantConnect.Lean.sln.DotSettings
+
+# ═══════════════════════════════════════════════════════════
+# Quant-LEAN Engineering — Custom project whitelist
+# ═══════════════════════════════════════════════════════════
+!backtest_ui/
+!backtest_ui/**
+backtest_ui/__pycache__/
+!Algorithm.Python/MultiSignalStrategy.py
+!Dockerfile.render
+!HANDOFF_REPORT.md
+!lesson_learn.md
+!Launcher/config.json
+Launcher/data-monitor-report-*.json
+Launcher/failed-data-requests-*.txt
+Launcher/succeeded-data-requests-*.txt
+Launcher/log.txt
+Launcher/*.log
+log.txt

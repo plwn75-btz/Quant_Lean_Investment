@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Quant-LEAN Engineering | QuantConnect</title>
+  <meta name="description" content="Interactive backtesting dashboard for multi-condition buy/sell signal strategies powered by QuantConnect LEAN." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ═══════════════════════ HEADER ══════════════════════════════════════════ -->
+<header class="header">
+  <div class="header-logo">
+    <div class="logo-icon">📈</div>
+    <span>Quant-LEAN Engineering</span>
+    <span class="header-badge">LEAN Engine</span>
+  </div>
+  <div class="status-pill">
+    <div class="status-dot" id="status-dot"></div>
+    <span id="status-text">Idle — configure and run a backtest</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════ LAYOUT ══════════════════════════════════════════ -->
+<div class="layout">
+
+  <!-- ════════ LEFT SIDEBAR ════════════════════════════════════════════════ -->
+  <aside class="sidebar">
+
+    <!-- ── Strategy Setup ───────────────────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <div class="section-title"><span class="icon">🎯</span> Strategy Setup</div>
+        <span class="section-chevron">▾</span>
+      </div>
+      <div class="section-body">
+        <div class="field">
+          <label for="data-source">Data Source</label>
+          <select id="data-source" style="width: 100%; padding: 4px; margin-bottom: 8px; background: var(--panel-bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px;">
+            <option value="auto">Auto-Download CSV (Yahoo Finance)</option>
+            <option value="api">QuantConnect Cloud API</option>
+          </select>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="ticker">Symbol</label>
+            <input type="text" id="ticker" value="GOOG" placeholder="e.g. GOOG" />
+          </div>
+          <div class="field">
+            <label for="initial-cash">Capital ($)</label>
+            <input type="number" id="initial-cash" value="100000" min="1000" step="1000" />
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="start-date">Start Date</label>
+            <input type="date" id="start-date" />
+
+          </div>
+          <div class="field">
+            <label for="end-date">End Date</label>
+            <input type="date" id="end-date" />
+
+          </div>
+        </div>
+        <div class="field">
+          <label for="position-size">Position Size: <span class="range-value" id="pos-size-val">100%</span></label>
+          <input type="range" id="position-size" min="0.1" max="1" step="0.05" value="1"
+                 oninput="syncRange(this,'pos-size-val', v => Math.round(v*100)+'%')" />
+          <div class="range-labels"><span>10%</span><span>100%</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Buy Conditions ────────────────────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <div class="section-title"><span class="icon">🟢</span> Buy Conditions</div>
+        <span class="section-chevron">▾</span>
+      </div>
+      <div class="section-body">
+        <div class="toggle-grid" id="buy-toggles">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Sell Conditions ───────────────────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <div class="section-title"><span class="icon">🔴</span> Sell Conditions</div>
+        <span class="section-chevron">▾</span>
+      </div>
+      <div class="section-body">
+        <div class="toggle-grid" id="sell-toggles">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+    </div>
+
+    <!-- ── EMA Settings ──────────────────────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <div class="section-title"><span class="icon">〰️</span> EMA Periods</div>
+        <span class="section-chevron">▾</span>
+      </div>
+      <div class="section-body">
+        <div class="field-row-3">
+          <div class="field">
+            <label for="ema13-period">EMA 13</label>
+            <input type="number" id="ema13-period" value="13" min="2" max="100" />
+          </div>
+          <div class="field">
+            <label for="ema50-period">EMA 50</label>
+            <input type="number" id="ema50-period" value="50" min="5" max="200" />
+          </div>
+          <div class="field">
+            <label for="ema200-period">EMA 200</label>
+            <input type="number" id="ema200-period" value="200" min="20" max="500" />
+          </div>
+        </div>
+        <div class="field">
+          <label>EMA Proximity (SCOND1/11): <span class="range-value" id="ema-prox-val">10%</span></label>
+          <input type="range" id="ema-proximity" min="0.01" max="0.3" step="0.01" value="0.1"
+                 oninput="syncRange(this,'ema-prox-val', v => Math.round(v*100)+'%')" />
+        </div>
+      </div>
+    </div>
+
+    <!-- ── RSI ──────────────────────────────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <div class="section-title"><span class="icon">📉</span> RSI</div>
+        <span class="section-chevron">▾</span>
+      </div>
+      <div class="section-body">
+        <div class="field">
+          <label for="rsi-period">RSI Period</label>
+          <input type="number" id="rsi-period" value="14" min="2" max="50" />
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Oversold (Buy): <span class="range-value" id="rsi-os-val">40</span></label>
+            <input type="range" id="rsi-oversold" min="10" max="50" step="1" value="40"
+                   oninput="syncRange(this,'rsi-os-val')" />
+          </div>
+          <div class="field">
+            <label>Overbought (Sell): <span class="range-value" id="rsi-ob-val">65</span></label>
+            <input type="range" id="rsi-overbought" min="50" max="90" step="1" value="65"
+                   oninput="syncRange(this,'rsi-ob-val')" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── MACD ─────────────────────────────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <div class="section-title"><span class="icon">🌊</span> MACD</div>
+        <span class="section-chevron">▾</span>
+      </div>
+      <div class="section-body">
+        <div class="field-row-3">
+          <div class="field">
+            <label for="macd-fast">Fast</label>
+            <input type="number" id="macd-fast" value="12" min="2" max="50" />
+          </div>
+          <div class="field">
+            <label for="macd-slow">Slow</label>
+            <input type="number" id="macd-slow" value="26" min="5" max="100" />
+          </div>
+          <div class="field">
+            <label for="macd-signal">Signal</label>
+            <input type="number" id="macd-signal" value="9" min="2" max="30" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Stochastic ────────────────────────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <div class="section-title"><span class="icon">📊</span> Stochastic</div>
+        <span class="section-chevron">▾</span>
+      </div>
+      <div class="section-body">
+        <div class="field-row">
+          <div class="field">
+            <label for="stoch-period">Period</label>
+            <input type="number" id="stoch-period" value="14" min="2" max="50" />
+          </div>
+          <div class="field">
+            <label for="stoch-k">%K Smooth</label>
+            <input type="number" id="stoch-k" value="3" min="1" max="10" />
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Buy Threshold: <span class="range-value" id="stoch-buy-val">70</span></label>
+            <input type="range" id="stoch-buy-thr" min="50" max="95" step="1" value="70"
+                   oninput="syncRange(this,'stoch-buy-val')" />
+          </div>
+          <div class="field">
+            <label>Sell Threshold: <span class="range-value" id="stoch-sell-val">70</span></label>
+            <input type="range" id="stoch-sell-thr" min="10" max="80" step="1" value="70"
+                   oninput="syncRange(this,'stoch-sell-val')" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── ADX ──────────────────────────────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <div class="section-title"><span class="icon">💪</span> ADX / PDI / MDI</div>
+        <span class="section-chevron">▾</span>
+      </div>
+      <div class="section-body">
+        <div class="field-row">
+          <div class="field">
+            <label for="adx-period">ADX Period</label>
+            <input type="number" id="adx-period" value="14" min="2" max="50" />
+          </div>
+          <div class="field">
+            <label>ADX Threshold: <span class="range-value" id="adx-thr-val">25</span></label>
+            <input type="range" id="adx-threshold" min="10" max="50" step="1" value="25"
+                   oninput="syncRange(this,'adx-thr-val')" />
+          </div>
+        </div>
+        <div class="field">
+          <label>PDI Threshold (BCOND7): <span class="range-value" id="pdi-thr-val">30</span></label>
+          <input type="range" id="pdi-threshold" min="10" max="60" step="1" value="30"
+                 oninput="syncRange(this,'pdi-thr-val')" />
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Parabolic SAR ─────────────────────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <div class="section-title"><span class="icon">🔺</span> Parabolic SAR</div>
+        <span class="section-chevron">▾</span>
+      </div>
+      <div class="section-body">
+        <div class="field">
+          <label>Acceleration: <span class="range-value" id="sar-acc-val">0.020</span></label>
+          <input type="range" id="sar-acc" min="0.001" max="0.1" step="0.001" value="0.02"
+                 oninput="syncRange(this,'sar-acc-val', v => parseFloat(v).toFixed(3))" />
+        </div>
+        <div class="field">
+          <label>Max Acceleration: <span class="range-value" id="sar-max-val">0.200</span></label>
+          <input type="range" id="sar-max-acc" min="0.05" max="1" step="0.01" value="0.2"
+                 oninput="syncRange(this,'sar-max-val', v => parseFloat(v).toFixed(3))" />
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Bollinger Bands ───────────────────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <div class="section-title"><span class="icon">🎸</span> Bollinger Bands</div>
+        <span class="section-chevron">▾</span>
+      </div>
+      <div class="section-body">
+        <div class="field-row">
+          <div class="field">
+            <label for="bb-period">Period</label>
+            <input type="number" id="bb-period" value="15" min="5" max="100" />
+          </div>
+          <div class="field">
+            <label>Width (σ): <span class="range-value" id="bb-width-val">2.0</span></label>
+            <input type="range" id="bb-width" min="0.5" max="4" step="0.05" value="2"
+                   oninput="syncRange(this,'bb-width-val', v => parseFloat(v).toFixed(1))" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Volume ────────────────────────────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <div class="section-title"><span class="icon">📦</span> Volume</div>
+        <span class="section-chevron">▾</span>
+      </div>
+      <div class="section-body">
+        <div class="field-row">
+          <div class="field">
+            <label for="avvol-period">Avg Period</label>
+            <input type="number" id="avvol-period" value="5" min="1" max="30" />
+          </div>
+          <div class="field">
+            <label>BuyVol Ratio: <span class="range-value" id="vol-ratio-val">2.0×</span></label>
+            <input type="range" id="vol-ratio" min="1" max="5" step="0.1" value="2"
+                   oninput="syncRange(this,'vol-ratio-val', v => parseFloat(v).toFixed(1)+'×')" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 52-Week & Gaps ─────────────────────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <div class="section-title"><span class="icon">📅</span> 52-Week & Gaps</div>
+        <span class="section-chevron">▾</span>
+      </div>
+      <div class="section-body">
+        <div class="field-row">
+          <div class="field">
+            <label>52W High Margin: <span class="range-value" id="h52w-val">10%</span></label>
+            <input type="range" id="h52w-margin" min="0.01" max="0.5" step="0.01" value="0.1"
+                   oninput="syncRange(this,'h52w-val', v => Math.round(v*100)+'%')" />
+          </div>
+          <div class="field">
+            <label>52W Low Margin: <span class="range-value" id="l52w-val">30%</span></label>
+            <input type="range" id="l52w-margin" min="0.05" max="1" step="0.05" value="0.3"
+                   oninput="syncRange(this,'l52w-val', v => Math.round(v*100)+'%')" />
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Gap Up %: <span class="range-value" id="gap-up-val">2%</span></label>
+            <input type="range" id="gap-up-pct" min="0.005" max="0.1" step="0.005" value="0.02"
+                   oninput="syncRange(this,'gap-up-val', v => Math.round(v*100)+'%')" />
+          </div>
+          <div class="field">
+            <label>Gap Down %: <span class="range-value" id="gap-dn-val">2%</span></label>
+            <input type="range" id="gap-down-pct" min="0.005" max="0.1" step="0.005" value="0.02"
+                   oninput="syncRange(this,'gap-dn-val', v => Math.round(v*100)+'%')" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Run Button ─────────────────────────────────────────────────────── -->
+    <div class="run-section">
+      <button class="btn-run" id="btn-run" onclick="runBacktest()">
+        <div class="btn-shimmer"></div>
+        ▶ Run Backtest
+      </button>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="progress-fill"></div>
+      </div>
+    </div>
+
+  </aside>
+  <!-- ════════ END SIDEBAR ══════════════════════════════════════════════════ -->
+
+
+  <!-- ════════ MAIN RESULTS PANEL ══════════════════════════════════════════ -->
+  <main class="main-panel">
+
+    <!-- ── Metric Cards ─────────────────────────────────────────────────── -->
+    <div class="metrics-grid" id="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-label">Total Return</div>
+        <div class="metric-value" id="m-return">—</div>
+        <div class="metric-sub" id="m-return-sub">awaiting run</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Win Rate</div>
+        <div class="metric-value" id="m-winrate">—</div>
+        <div class="metric-sub" id="m-winrate-sub">wins / total trades</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Total Trades</div>
+        <div class="metric-value" id="m-trades">—</div>
+        <div class="metric-sub" id="m-trades-sub">completed round-trips</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Avg Win</div>
+        <div class="metric-value" id="m-avgwin">—</div>
+        <div class="metric-sub">per winning trade</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Avg Loss</div>
+        <div class="metric-value" id="m-avgloss">—</div>
+        <div class="metric-sub">per losing trade</div>
+      </div>
+    </div>
+
+    <!-- ── Two-Column Layout: Chart (Left) & Trade Log (Right) ─────────────── -->
+    <div class="split-row">
+      <!-- ── Chart ────────────────────────────────────────────────────────── -->
+      <div class="card" style="margin-bottom:0;">
+        <div class="card-header">
+          <div class="card-title">
+            📈 Trade PnL — Cumulative
+          </div>
+          <div class="tab-bar">
+            <button class="tab active" id="tab-pnl"   onclick="switchTab('pnl')">PnL Curve</button>
+            <button class="tab"        id="tab-bar"   onclick="switchTab('bar')">Per-Trade Bar</button>
+            <button class="tab"        id="tab-price" onclick="switchTab('price')">Buy/Sell Price</button>
+
+          </div>
+        </div>
+        <div class="card-body" style="padding: 15px;">
+          <div class="chart-container">
+            <canvas id="chart-main"></canvas>
+          </div>
+          <!-- Empty state shown before first run -->
+          <div class="empty-state" id="chart-empty">
+            <div class="empty-icon">🚀</div>
+            <div class="empty-title">No backtest data yet</div>
+            <div class="empty-sub">Configure your strategy in the panel on the left, then click <strong>Run Backtest</strong>.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Trade Log Table ─────────────────────────────────────────────────── -->
+      <div class="card" style="margin-bottom:0;">
+        <div class="card-header">
+          <div class="card-title">🗒️ Trade Log</div>
+          <span id="trade-count" style="font-size:0.78rem; color:var(--text-muted)"></span>
+        </div>
+        <div class="card-body" style="padding:0;">
+          <div class="table-wrap">
+            <table id="trade-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Buy Date</th>
+                  <th>Buy Price</th>
+                  <th>Sell Date</th>
+                  <th>Sell Price</th>
+                  <th>PnL %</th>
+                  <th>Buy Signals</th>
+                  <th>Sell Signals</th>
+                </tr>
+              </thead>
+              <tbody id="trade-tbody">
+                <tr>
+                  <td colspan="8" style="text-align:center; padding:30px; color:var(--text-muted);">
+                    No trades yet — run a backtest to see results.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Detailed Strategy Statistics Report ───────────────────────────── -->
+    <div class="card" id="stats-report-card">
+      <div class="card-header">
+        <div class="card-title">📊 Strategy Statistics Report (AmiBroker Style)</div>
+        <span style="font-size:0.75rem; color:var(--text-muted)">Detailed Performance Breakdown</span>
+      </div>
+      <div class="card-body" style="padding:0;">
+        <div class="table-wrap" style="overflow-x: auto;">
+          <table class="stats-table" id="stats-table">
+
+            <thead>
+              <tr class="stats-hdr-row">
+                <th class="stats-label-col">Statistics</th>
+                <th class="stats-val-col">All trades</th>
+                <th class="stats-val-col">Long trades</th>
+                <th class="stats-val-col">Short trades</th>
+              </tr>
+            </thead>
+            <tbody id="stats-tbody">
+              <tr>
+                <td colspan="4" style="text-align:center; padding:30px; color:var(--text-muted)">
+                  No backtest run yet. Run a backtest to see detailed statistics.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Log Console ────────────────────────────────────────────────────── -->
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">🖥️ LEAN Engine Log</div>
+        <button onclick="clearLog()" style="
+          background:transparent; border:1px solid var(--border); border-radius:4px;
+          color:var(--text-muted); font-size:0.72rem; padding:4px 10px; cursor:pointer;">
+          Clear
+        </button>
+      </div>
+      <div class="card-body" style="padding:0;">
+        <div class="log-console" id="log-console">
+          <div class="log-line" style="color:var(--text-muted)">Waiting for backtest…</div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+  <!-- ════════ END MAIN PANEL ══════════════════════════════════════════════ -->
+
+</div><!-- /.layout -->
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

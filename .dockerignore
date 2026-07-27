@@ -1,6 +1,18 @@
+# Ignore large/unnecessary directories for Docker build
 packages/*
 .git/*
 .github/*
 .vs/*
 .nuget/*
 Tests/*
+.devcontainer/*
+.vscode/*
+
+# Ignore LEAN C# build artifacts (we compile from source inside the container)
+*/obj/*
+*/bin/*
+
+# Keep backtest_ui (our app)
+!backtest_ui/
+!backtest_ui/**
+backtest_ui/__pycache__/
