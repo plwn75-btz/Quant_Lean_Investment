@@ -429,6 +429,10 @@ def _patch_config(params: dict):
     cfg["algorithm-location"]  = algo_path
     cfg["data-folder"]         = data_path
     cfg["close-automatically"] = True
+    
+    # Force LEAN to use the Python engine and Backtesting environment
+    cfg["algorithm-language"]  = "Python"
+    cfg["environment"]         = "backtesting"
 
     # Merge UI parameters (LEAN expects string values)
     if "parameters" not in cfg:
