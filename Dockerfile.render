@@ -34,10 +34,19 @@ COPY Queues/ /app/Queues/
 COPY QuantConnect.Lean.sln /app/
 COPY LocalPackages/ /app/LocalPackages/
 
+# 3b. Create a stub Algorithm.CSharp project to suppress MSB9008 warning
+#     Engine.csproj references ../Algorithm.CSharp/QuantConnect.Algorithm.CSharp.csproj
+#     If it does not exist, MSBuild emits warning MSB9008 and may route the
+#     algorithm through the C# IL loader instead of the Python loader (LL-15).
+RUN mkdir -p /app/Algorithm.CSharp && \
+    printf '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net9.0</TargetFramework><AssemblyName>QuantConnect.Algorithm.CSharp</AssemblyName></PropertyGroup></Project>' \
+    > /app/Algorithm.CSharp/QuantConnect.Algorithm.CSharp.csproj
+
 # 4. Restore & build the LEAN Launcher project so dotnet exec works
 #    We use 'dotnet exec <dll>' instead of 'dotnet run --project' at runtime
 #    to skip recompilation and avoid the C# IL loader race condition that
 #    occurs when Algorithm.CSharp.csproj is absent (MSB9008 warning).
+#    The stub Algorithm.CSharp project (step 3b) must exist BEFORE restore.
 RUN dotnet restore Launcher/QuantConnect.Lean.Launcher.csproj && \
     dotnet build Launcher/QuantConnect.Lean.Launcher.csproj -c Debug --no-restore
 
@@ -46,6 +55,44 @@ RUN echo "=== LEAN Launcher DLL ===" && \
     find /app/Launcher/bin -name "QuantConnect.Lean.Launcher.dll" | tee /dev/stderr | head -5 && \
     test -n "$(find /app/Launcher/bin -name 'QuantConnect.Lean.Launcher.dll' | head -1)" || \
     (echo "ERROR: LEAN Launcher DLL not found after build!" && exit 1)
+
+# 4c. Pre-warm ticker cache (LL-16)
+#     Docker build uses ephemeral builder IPs (not the persistent Render service
+#     IP), so Yahoo Finance rate-limiting is far less likely during image build.
+#     Baking ZIPs into the image means the first backtest needs no network call.
+#     Failures for individual tickers are non-fatal (logged as WARN).
+RUN python3 - <<'PYEOF'
+import yfinance as yf, zipfile, pathlib, sys
+
+tickers = ['GOOG', 'AAPL', 'AOT.BK', 'PTT.BK', 'SCB.BK', 'KBANK.BK']
+data_dir = pathlib.Path('/app/Data/equity/usa/daily')
+data_dir.mkdir(parents=True, exist_ok=True)
+
+for ticker in tickers:
+    try:
+        import pandas as pd
+        df = yf.download(ticker, start='1998-01-01', progress=False, auto_adjust=True)
+        if df is None or df.empty:
+            print(f'WARN: no data for {ticker}', file=sys.stderr)
+            continue
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        lines = []
+        for idx, row in df.iterrows():
+            d = idx.strftime('%Y%m%d 00:00')
+            o = int(round(float(row['Open'])  * 10000))
+            h = int(round(float(row['High'])  * 10000))
+            l = int(round(float(row['Low'])   * 10000))
+            c = int(round(float(row['Close']) * 10000))
+            v = max(0, int(round(float(row['Volume']))))
+            lines.append(f'{d},{o},{h},{l},{c},{v}')
+        zip_path = data_dir / f'{ticker.lower()}.zip'
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(f'{ticker.lower()}.csv', '\n'.join(lines) + '\n')
+        print(f'OK: {ticker} ({len(lines)} bars up to {lines[-1][:8] if lines else "?"})', flush=True)
+    except Exception as e:
+        print(f'WARN: {ticker} failed: {e}', file=sys.stderr)
+PYEOF
 
 # 5. Render injects PORT at runtime; default to 5000 for local testing
 ENV PORT=5000

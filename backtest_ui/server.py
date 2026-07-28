@@ -377,11 +377,28 @@ def _run_lean(params: dict):
             cmd = [dotnet_bin, lean_dll]
         else:
             _log("[LEAN] Pre-built DLL not found — falling back to 'dotnet run' (slower, may cause IL loader issue)")
-            cmd = [dotnet_bin, "run", "--project", str(LAUNCHER_DIR)]
+            cmd = [dotnet_bin, "run", "--project", str(LAUNCHER_DIR),
+                   "--"]   # '--' separates MSBuild args from app args
+
+        # ── Critical algorithm settings passed as CLI args ────────────────────
+        # LEAN's Config.MergeCommandLineArgumentsWithConfig() applies these
+        # ON TOP of config.json, making them the highest-priority override.
+        # This eliminates the AppDomain.BaseDirectory race (LL-15): even if
+        # LEAN reads the MSBuild-copied original config.json from bin/Debug/,
+        # the CLI args guarantee algorithm-language=Python and the correct path.
+        algo_path = str((PROJECT_DIR / "Algorithm.Python" / "MultiSignalStrategy.py").resolve())
+        lean_algo_args = [
+            "--algorithm-type-name", "MultiSignalStrategy",
+            "--algorithm-language",  "Python",
+            "--algorithm-location",  algo_path,
+        ]
+        cmd.extend(lean_algo_args)
+        _log(f"[LEAN] CLI override: {' '.join(lean_algo_args)}")
 
         if data_source == "api":
             # Append extra args; dotnet exec does not use '--' separator
             cmd.extend(["--data-provider-historical", "QuantConnect", "--data-downloader", "QuantConnect"])
+
 
         # Pass UTF-8 through to the subprocess so LEAN logs are readable
         env = {
