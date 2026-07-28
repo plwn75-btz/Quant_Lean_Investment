@@ -1,6 +1,6 @@
 # Lessons Learned — Quant-LEAN Engineering UI & Strategy
 **Project:** QuantConnect Multi-Signal Strategy & Interactive UI
-**Last Updated:** 25 Jul 2026
+**Last Updated:** 27 Jul 2026
 
 ---
 
@@ -45,3 +45,42 @@
 **Lesson:** Computing 30+ detailed metrics (Capital & Profit, All/Long/Short trade splits, Win/Loss streaks, Max Drawdown $, CAR/MaxDD, Profit Factor, Payoff Ratio, Ulcer Index, Sharpe, K-Ratio) directly from trade logs and rendering them in a dedicated 3-column table creates an enterprise-grade report.
 **Color Convention:** Enforce strict visual encoding across the entire dashboard (including top metric cards like AVG WIN and AVG LOSS): positive gains/ratios styled in **Green** (`#10b981`), negative losses/drawdowns styled in **Red** (`#f43f5e`), and neutral values in muted blue-grey (`#8a9ab8`). This dynamic styling prevents visual ambiguity.
 
+## LL-10: Forked Repository `.gitignore` Conflicts
+**Problem:** Forking or cloning the official QuantConnect/Lean repository inherits an aggressive `.gitignore` with broad wildcard patterns (e.g., `*Data/*`, `*/bin/*`, `*.sh`). When adding custom project files (like `backtest_ui/`, `MultiSignalStrategy.py`, `Dockerfile.render`), these files are **silently ignored by Git** — `git add` appears to succeed but the files never make it into the commit. Pushing to GitHub results in a repository that is missing critical application files, causing downstream Docker builds to fail with "No such file or directory" errors.
+**Fix:** Added explicit whitelist rules at the bottom of `.gitignore` using the `!` negation prefix:
+```
+!backtest_ui/
+!backtest_ui/**
+!Algorithm.Python/MultiSignalStrategy.py
+!Dockerfile.render
+```
+**Lesson:** When building on top of a forked open-source repository, **always audit the inherited `.gitignore`** before your first commit. Use `git check-ignore -v <file>` to diagnose why files are not being tracked, and add targeted `!` negation rules rather than removing upstream ignore patterns.
+
+## LL-11: Multi-Runtime Docker Images for Hybrid Projects
+**Problem:** The Quant-LEAN dashboard requires both **Python** (Flask server, yfinance data download) and **.NET SDK** (to compile and run the LEAN C# engine via `dotnet run`). Standard cloud platforms like Render.com only provide single-language runtimes by default.
+**Fix:** Used `quantconnect/lean:foundation` as the Docker base image, which ships with .NET SDK, Python 3.11, and TA-Lib pre-installed. The `Dockerfile.render` uses explicit `COPY` instructions for each required LEAN project directory and runs `dotnet restore && dotnet build` during the image build to pre-compile the Launcher.
+**Lesson:** For hybrid-runtime projects, always look for an official foundation image from the upstream project before attempting to build a custom multi-SDK Docker image from scratch. Also use explicit per-directory `COPY` statements instead of `COPY . /app/` to maintain fine-grained control over what enters the container and to leverage Docker layer caching.
+
+## LL-12: Render.com PORT Binding & Git Branch Mapping
+**Problem:** Render.com injects a `PORT` environment variable at runtime and expects the application to bind to it. Hardcoding `port=5000` causes the health check to fail and the service to never become "live." Additionally, the local Git branch was `master` while the GitHub remote expected `main`, and the `origin` remote was still pointing to the upstream `QuantConnect/Lean` repository instead of the user's fork.
+**Fix:**
+1. Updated `server.py` to use `port = int(os.environ.get("PORT", 5000))`.
+2. Changed the remote URL: `git remote set-url origin https://github.com/plwn75-btz/Quant_Lean_Investment.git`.
+3. Used `git push origin master:main` to map the local `master` branch to the remote `main` branch.
+**Lesson:** When deploying to PaaS platforms (Render, Heroku, Railway), always bind to the `PORT` environment variable. When working with forked repos, verify `git remote -v` before pushing — the remote URL often still points to the original upstream repository. Use `git push origin <local-branch>:<remote-branch>` when branch names differ.
+
+## LL-13: `dotnet run` vs `dotnet exec` — IL Loader Race Condition in Docker
+**Problem:** `server.py` used `dotnet run --project Launcher/` to execute LEAN. Inside the Docker container this triggers a **full MSBuild recompile on every backtest request** (~25 s). During recompile, `Algorithm.CSharp.csproj` is referenced but absent (MSB9008 warning), which causes the LEAN job-queue to route the Python `.py` file through the **C# IL assembly loader** instead of the Python loader. The result is a fatal `System.BadImageFormatException: Bad IL format` on `MultiSignalStrategy.py`, and the backtest exits with code 1 after ~90 seconds producing zero trades.
+**Fix:**
+1. Added `_get_lean_dll()` to `server.py` — scans `Launcher/bin/Debug/*/*.dll` and `Launcher/bin/Release/*/*.dll` for the pre-built launcher DLL.
+2. Switched the execution command to `dotnet <dll_path>` (equivalent to `dotnet exec`) when the DLL is found. This skips all recompilation, loads config.json only **after** `_patch_config()` has written it, and always activates the correct Python loader via `algorithm-language: "Python"`.
+3. Removed the silent `|| echo "LEAN build skipped"` from `Dockerfile.render` so build failures are surfaced during image build rather than silently deferred to runtime.
+4. Added a DLL existence verification step in `Dockerfile.render` (`find /app/Launcher/bin ... && test -n ...`) so a missing DLL fails the Docker build early.
+**Lesson:** Never use `dotnet run --project` in a production container if the DLL is already pre-built. Always prefer `dotnet exec <dll>` or `dotnet <dll>` to bypass MSBuild entirely. The missing C# project reference (MSB9008) is a silent build warning that turns into a fatal runtime error via the wrong loader path.
+
+## LL-14: Yahoo Finance Rate Limiting on Cloud Server IPs
+**Problem:** On Render.com, the outbound IP of the container is shared across many tenants. Yahoo Finance aggressively rate-limits shared cloud IPs, causing `YFRateLimitError('Too Many Requests')` on the first download attempt. The original `_ensure_data()` simply logged `[DATA] ERROR: No data returned` and returned silently — LEAN then launched with no market data, produced zero trades, and the UI showed a misleading "0 trades" result with no error message.
+**Fix:**
+1. Wrapped the `yf.download()` call in a retry loop (max 3 attempts) with **exponential backoff + random jitter** (2, 4+ seconds between retries).
+2. After all retries are exhausted with an empty result, `_ensure_data()` now raises `RuntimeError` with a human-readable message instead of silently returning. This propagates to `_run_lean()` and is returned as a 500 response with the clear message: *"No market data available for 'X' after 3 attempts. Yahoo Finance may be rate-limiting this server IP..."*
+**Lesson:** Cloud platform IPs are frequently pre-blocked or heavily rate-limited by external APIs. Always implement retry-with-backoff, and **always surface a hard error rather than proceeding with empty data**. A silent "0 trades" result is far worse than a clear failure message.

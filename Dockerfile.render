@@ -34,14 +34,23 @@ COPY Queues/ /app/Queues/
 COPY QuantConnect.Lean.sln /app/
 COPY LocalPackages/ /app/LocalPackages/
 
-# 4. Restore & build the LEAN Launcher project so `dotnet run` works
+# 4. Restore & build the LEAN Launcher project so dotnet exec works
+#    We use 'dotnet exec <dll>' instead of 'dotnet run --project' at runtime
+#    to skip recompilation and avoid the C# IL loader race condition that
+#    occurs when Algorithm.CSharp.csproj is absent (MSB9008 warning).
 RUN dotnet restore Launcher/QuantConnect.Lean.Launcher.csproj && \
-    dotnet build Launcher/QuantConnect.Lean.Launcher.csproj -c Debug --no-restore || \
-    echo "LEAN build skipped (will compile on first backtest run)"
+    dotnet build Launcher/QuantConnect.Lean.Launcher.csproj -c Debug --no-restore
+
+# 4b. Verify the pre-built DLL exists (fails the image build early if missing)
+RUN echo "=== LEAN Launcher DLL ===" && \
+    find /app/Launcher/bin -name "QuantConnect.Lean.Launcher.dll" | tee /dev/stderr | head -5 && \
+    test -n "$(find /app/Launcher/bin -name 'QuantConnect.Lean.Launcher.dll' | head -1)" || \
+    (echo "ERROR: LEAN Launcher DLL not found after build!" && exit 1)
 
 # 5. Render injects PORT at runtime; default to 5000 for local testing
 ENV PORT=5000
 EXPOSE 5000
 
-# 6. Launch the Flask server
+# 6. Launch the Flask server (LEAN reads config.json relative to /app/Launcher)
+WORKDIR /app
 CMD ["python", "backtest_ui/server.py"]

@@ -163,21 +163,58 @@ def _get_dotnet_cmd():
     return shutil.which("dotnet") or "dotnet"
 
 
+def _get_lean_dll():
+    """Find the pre-built LEAN Launcher DLL to use with 'dotnet exec'.
+
+    Using a pre-built DLL avoids 'dotnet run' which triggers a full
+    recompile on every backtest request.  The recompile introduces a
+    race condition where config.json might be read before the patch is
+    complete, and causes the C# IL loader to fire instead of the Python
+    loader when Algorithm.CSharp.csproj is missing (MSB9008 warning).
+
+    The Dockerfile already runs 'dotnet build -c Debug', so the output
+    DLL is guaranteed to exist after a successful image build.
+    """
+    import glob
+    patterns = [
+        str(LAUNCHER_DIR / "bin" / "Debug" / "*" / "QuantConnect.Lean.Launcher.dll"),
+        str(LAUNCHER_DIR / "bin" / "Release" / "*" / "QuantConnect.Lean.Launcher.dll"),
+    ]
+    for pattern in patterns:
+        matches = sorted(glob.glob(pattern))
+        if matches:
+            return matches[-1]   # pick the last (newest target framework)
+    return None
+
+
 def _get_python_dll():
-    """Find the specific python runtime DLL (e.g., python311.dll) to prevent pythonnet from loading python3.dll stub."""
+    """Find the specific python runtime DLL (e.g., python311.dll or libpython3.11.so)
+    to prevent pythonnet from loading the python3.dll stub."""
     if "PYTHONNET_PYDLL" in os.environ and os.path.exists(os.environ["PYTHONNET_PYDLL"]):
         return os.environ["PYTHONNET_PYDLL"]
-    
+
+    # ── Linux / Docker: look for libpython3.XX.so.1.0 first ──────────────────
+    import glob as _glob
+    so_pattern = f"/opt/miniconda3/lib/libpython{sys.version_info.major}.{sys.version_info.minor}.so*"
+    so_matches = sorted(_glob.glob(so_pattern))
+    if so_matches:
+        return so_matches[0]
+    # Fallback generic Linux search
+    so_matches = sorted(_glob.glob(f"/usr/lib/libpython{sys.version_info.major}.{sys.version_info.minor}*.so*"))
+    if so_matches:
+        return so_matches[0]
+
+    # ── Windows: look for python3XX.dll ──────────────────────────────────────
     dll_name = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
     for base in (Path(sys.executable).parent, Path(sys.base_prefix), Path(sys.base_exec_prefix)):
         candidate = base / dll_name
         if candidate.exists():
             return str(candidate)
-            
+
     for candidate in Path(sys.base_prefix).glob(f"**/{dll_name}"):
         if candidate.exists():
             return str(candidate)
-            
+
     return None
 
 
@@ -232,18 +269,43 @@ def _ensure_data(ticker: str, end_date: str = None):
     else:
         _log(f"[DATA] {ticker} not found locally. Downloading from Yahoo Finance...")
 
-    # ── Download ─────────────────────────────────────────────────────────────
+    # ── Download (with retry + exponential backoff) ──────────────────────────
     try:
         import yfinance as yf
         import pandas as pd
         import zipfile
+        import time
+        import random
         from datetime import date as _date
 
         download_end = (_date.today() + timedelta(days=1)).isoformat()  # inclusive today
-        df = yf.download(ticker, start="1998-01-01", end=download_end, progress=False)
-        if df.empty:
-            _log(f"[DATA] ERROR: No data returned from Yahoo Finance for {ticker}")
-            return
+        df = None
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                df = yf.download(ticker, start="1998-01-01", end=download_end, progress=False)
+                if df is not None and not df.empty:
+                    break
+                # Empty result (may be a soft rate-limit or unknown ticker)
+                _log(f"[DATA] Empty result from Yahoo Finance for {ticker} (attempt {attempt}/{max_attempts})")
+            except Exception as dl_err:
+                _log(f"[DATA] Download error for {ticker} (attempt {attempt}/{max_attempts}): {dl_err}")
+                df = None
+
+            if attempt < max_attempts:
+                wait_secs = (2 ** attempt) + random.uniform(0.5, 1.5)
+                _log(f"[DATA] Retrying in {wait_secs:.1f}s...")
+                time.sleep(wait_secs)
+
+        # ── Hard abort if no data after all retries ──────────────────────────
+        if df is None or df.empty:
+            raise RuntimeError(
+                f"No market data available for '{ticker}' after {max_attempts} attempts. "
+                "Yahoo Finance may be rate-limiting this server IP. "
+                "Please wait a few minutes and try again, or switch to a different ticker "
+                "that may already be cached (e.g. GOOG, AAPL)."
+            )
+
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
@@ -263,8 +325,10 @@ def _ensure_data(ticker: str, end_date: str = None):
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr(f"{ticker.lower()}.csv", csv_content)
         _log(f"[DATA] Successfully downloaded and saved {ticker} ({len(csv_lines)} bars, up to {csv_lines[-1][:8] if csv_lines else 'N/A'})")
+    except RuntimeError:
+        raise   # re-raise our hard-abort error directly to _run_lean
     except Exception as e:
-        _log(f"[DATA] Failed to download {ticker}: {e}")
+        raise RuntimeError(f"[DATA] Failed to download {ticker}: {e}") from e
 
 
 
@@ -293,13 +357,31 @@ def _run_lean(params: dict):
         # 1. Patch config.json with the incoming parameters
         _patch_config(params)
 
-        # 2. Build the dotnet run command
+        # 2. Build the dotnet command — prefer pre-built DLL to avoid recompile
+        #
+        # WHY: Using 'dotnet run --project' triggers a full MSBuild recompile
+        # on every request inside the Docker container.  The recompile takes
+        # ~25 s and, more critically, causes a race condition: if
+        # Algorithm.CSharp.csproj is missing (MSB9008), the job-queue may
+        # route the algorithm through the C# IL loader instead of the Python
+        # loader, producing a BadImageFormatException on the .py file.
+        #
+        # The Dockerfile already runs 'dotnet build -c Debug', so the DLL is
+        # guaranteed to exist. We use 'dotnet <dll>' (dotnet exec) instead.
         dotnet_bin = _get_dotnet_cmd()
         _log(f"[LEAN] Using dotnet binary: {dotnet_bin}")
-        cmd = [dotnet_bin, "run", "--project", str(LAUNCHER_DIR)]
-        
+
+        lean_dll = _get_lean_dll()
+        if lean_dll:
+            _log(f"[LEAN] Using pre-built DLL: {lean_dll}")
+            cmd = [dotnet_bin, lean_dll]
+        else:
+            _log("[LEAN] Pre-built DLL not found — falling back to 'dotnet run' (slower, may cause IL loader issue)")
+            cmd = [dotnet_bin, "run", "--project", str(LAUNCHER_DIR)]
+
         if data_source == "api":
-            cmd.extend(["--", "--data-provider-historical", "QuantConnect", "--data-downloader", "QuantConnect"])
+            # Append extra args; dotnet exec does not use '--' separator
+            cmd.extend(["--data-provider-historical", "QuantConnect", "--data-downloader", "QuantConnect"])
 
         # Pass UTF-8 through to the subprocess so LEAN logs are readable
         env = {

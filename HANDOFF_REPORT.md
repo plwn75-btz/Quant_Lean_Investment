@@ -1,7 +1,7 @@
 # QuantConnect Interactive Backtesting UI
 ## Technical & Operational Handoff Report
 
-**Last Updated:** 25 Jul 2026
+**Last Updated:** 28 Jul 2026
 
 ---
 
@@ -44,9 +44,34 @@ The **QuantConnect Interactive Backtesting UI** acts as a bridge between a power
   - Dynamically patches `config.json` with user parameters.
   - Parses LEAN logs to capture trades, computing PnL, Win Rates, and cumulative chart series.
 
+- **Cloud Deployment (Render.com via Docker):**
+  - `Dockerfile.render` builds on `quantconnect/lean:foundation` (provides .NET SDK + Python + TA-Lib).
+  - Explicit `COPY` instructions for each LEAN project directory (Algorithm.Python, Launcher, Common, Engine, etc.).
+  - `dotnet restore && dotnet build` runs during image build so the Launcher is pre-compiled.
+  - **DLL Existence Verification:** A `RUN find ... && test -n ...` step was added after the build to fail the Docker image early if the Launcher DLL is missing (instead of silently deferring to runtime).
+  - Flask server binds to the `PORT` environment variable injected by Render at runtime.
+  - Repository: `https://github.com/plwn75-btz/Quant_Lean_Investment`
+- **LEAN Execution Method Fixed (`dotnet exec` vs `dotnet run`):**
+  - Root cause: `dotnet run --project Launcher/` triggered a full MSBuild recompile on every backtest inside the Docker container. With `Algorithm.CSharp.csproj` absent (MSB9008), the LEAN job-queue routed `MultiSignalStrategy.py` through the C# IL loader instead of the Python loader, causing `System.BadImageFormatException: Bad IL format`.
+  - Fix: Added `_get_lean_dll()` to `server.py` that scans `Launcher/bin/Debug/*/` and `Launcher/bin/Release/*/` for the pre-built DLL. Execution is now `dotnet <dll_path>` (dotnet exec), bypassing MSBuild entirely.
+  - Fallback: If the DLL is not found (e.g., local dev without a prior build), the server logs a warning and falls back to `dotnet run`.
+- **Yahoo Finance Rate-Limit Handling Fixed:**
+  - Root cause: Render.com's shared outbound IP is frequently rate-limited by Yahoo Finance. The original code silently returned on empty data, causing LEAN to launch with no market data and producing a misleading "0 trades" result.
+  - Fix: `_ensure_data()` now retries up to 3 times with exponential backoff (2s, 4s+jitter). On exhaustion, it raises `RuntimeError` with a clear user-facing message, aborting the backtest before LEAN is even launched.
+- **`_get_python_dll()` Enhanced for Linux/Docker:**
+  - Added explicit search for `libpython3.XX.so*` under `/opt/miniconda3/lib/` (the path used in the `quantconnect/lean:foundation` image) before falling back to the Windows `python3XX.dll` search.
+- **`config.json` Default Paths Corrected:**
+  - `algorithm-location` and `data-folder` now default to `/app/...` Docker paths instead of the local Windows developer path. `_patch_config()` always overwrites these at runtime, but the Docker-safe defaults act as a safety net.
+- **Git Configuration:**
+  - `.gitignore` updated with whitelist rules (`!backtest_ui/**`, `!Algorithm.Python/MultiSignalStrategy.py`, etc.) to override the aggressive upstream LEAN ignore patterns.
+  - `.dockerignore` updated to ensure `backtest_ui/` is included in Docker build context.
+  - LEAN runtime artifacts (data-monitor reports, failed/succeeded data request logs) are explicitly ignored.
+
 ### 2.2 What is PENDING / NEXT STEPS
-- **Cloud Deployment (Optional):** If needed, the Flask server and UI could be packaged into a Docker container and deployed to a remote server.
+- **Pre-warmed Ticker Cache (Optional):** Yahoo Finance rate-limiting on Render.com's shared IP means the first download of any new ticker may still fail even with retries. Consider pre-bundling a baseline set of commonly used tickers (GOOG, AAPL, AOT.BK) as ZIP files in the Docker image so the first backtest always succeeds without a network call.
 - **Advanced Asset Classes:** Currently, data downloading is tuned for US & International Equities (including `.BK` Thai stocks). If crypto or forex is needed, the `yfinance` parser can be extended to map to those specific LEAN data folder structures.
+- **Git LFS (Optional):** GitHub flagged `Data/option/usa/minute/aapl/20140606_quote_american.zip` (53.89 MB) as exceeding the 50 MB recommendation. If more large data files are added, consider enabling Git LFS.
+- **Production WSGI Server:** The current Flask development server works but consider switching to `gunicorn` for production-grade request handling on Render.
 
 ---
 
@@ -55,13 +80,20 @@ The **QuantConnect Interactive Backtesting UI** acts as a bridge between a power
 ### 3.1 Reviewing the Strategy
 You can review the algorithm logic in `Algorithm.Python/MultiSignalStrategy.py`. It is designed to be highly modular. By default, it expects parameters like `bcond1` (1 or 0) to enable/disable specific logic gates.
 
-### 3.2 Running the Dashboard
+### 3.2 Running the Dashboard (Local)
 1. Open a terminal in `backtest_ui/`.
 2. Run `python server.py`.
 3. Open `http://localhost:5000` in your web browser.
 4. Set your symbol (e.g., `AOT.BK`, `GOOG`, `AAPL`), adjust date ranges (defaults to the latest 6 years), select conditions, and click **Run Backtest**.
 
-### 3.3 Adding New Conditions
+### 3.3 Deploying to Render.com
+1. Push all changes to GitHub: `git push origin master:main`.
+2. On Render.com, create a **Web Service** connected to the GitHub repo.
+3. Set **Dockerfile Path** to `./Dockerfile.render`.
+4. Render automatically injects the `PORT` environment variable; the server binds to it.
+5. Deploy triggers automatically on every push to `main`.
+
+### 3.4 Adding New Conditions
 To add a new condition (e.g., `BCOND14`):
 1. Add the toggle in `index.html` under the Buy Conditions section.
 2. In `app.js`, ensure the toggle maps to the correct `bcond14` key.
@@ -74,10 +106,28 @@ To add a new condition (e.g., `BCOND14`):
 
 | File | Status | Description |
 |:---|:---:|:---|
-| `Algorithm.Python/MultiSignalStrategy.py` | DONE | Fully parameterized multi-condition LEAN algorithm. |
-| `backtest_ui/index.html` | DONE | Interactive HTML layout with dynamic date pickers and 3-tab chart. |
-| `backtest_ui/style.css` | DONE | Dark mode, glassmorphic styling. |
-| `backtest_ui/app.js` | DONE | UI logic complete; dynamic 6-year date setup, 3 chart views (PnL, Bar, Price). |
-| `backtest_ui/server.py` | DONE | Flask bridge with auto data download, stale-data detection, and `PYTHONNET_PYDLL` resolution. |
-| `HANDOFF_REPORT.md` | DONE | Technical & Operational handoff documentation. |
-| `lesson_learn.md` | DONE | Known gotchas, system caveats, and architectural lessons learned. |
+| `Algorithm.Python/MultiSignalStrategy.py` | ✅ DONE | Fully parameterized multi-condition LEAN algorithm. |
+| `backtest_ui/index.html` | ✅ DONE | Interactive HTML layout with dynamic date pickers and 3-tab chart. |
+| `backtest_ui/style.css` | ✅ DONE | Dark mode, glassmorphic styling with dynamic PnL color coding. |
+| `backtest_ui/app.js` | ✅ DONE | UI logic; dynamic 6-year date setup, 3 chart views, dynamic metric card colors. |
+| `backtest_ui/server.py` | ✅ DONE | Flask bridge. `dotnet exec` (pre-built DLL), retry+abort on yfinance rate-limit, Linux `.so` DLL detection. |
+| `Dockerfile.render` | ✅ DONE | Docker image for Render.com. DLL verification step added; silent build error swallow removed. |
+| `Launcher/config.json` | ✅ DONE | Default paths updated to Docker `/app/...` paths (patched at runtime by server.py). |
+| `.gitignore` | ✅ DONE | Updated with whitelist rules for custom project files. |
+| `.dockerignore` | ✅ DONE | Updated to include `backtest_ui/` in Docker build context. |
+| `HANDOFF_REPORT.md` | ✅ DONE | Technical & Operational handoff documentation. |
+| `lesson_learn.md` | ✅ DONE | Known gotchas, system caveats, and architectural lessons learned. |
+
+---
+
+## 5. Repository & Deployment Info
+
+| Item | Value |
+|:---|:---|
+| GitHub Repository | `https://github.com/plwn75-btz/Quant_Lean_Investment` |
+| Local Branch | `master` |
+| Remote Branch | `main` |
+| Push Command | `git push origin master:main` |
+| Render Dockerfile | `./Dockerfile.render` |
+| Base Docker Image | `quantconnect/lean:foundation` |
+| Server Port Binding | `os.environ.get("PORT", 5000)` |
