@@ -1,7 +1,7 @@
 # QuantConnect Interactive Backtesting UI
 ## Technical & Operational Handoff Report
 
-**Last Updated:** 28 Jul 2026
+**Last Updated:** 28 Jul 2026 (11:44 local)
 
 ---
 
@@ -55,6 +55,7 @@ The **QuantConnect Interactive Backtesting UI** acts as a bridge between a power
   - Root cause: `dotnet run --project Launcher/` triggered a full MSBuild recompile on every backtest inside the Docker container. With `Algorithm.CSharp.csproj` absent (MSB9008), the LEAN job-queue routed `MultiSignalStrategy.py` through the C# IL loader instead of the Python loader, causing `System.BadImageFormatException: Bad IL format`.
   - Fix: Added `_get_lean_dll()` to `server.py` that scans `Launcher/bin/Debug/*/` and `Launcher/bin/Release/*/` for the pre-built DLL. Execution is now `dotnet <dll_path>` (dotnet exec), bypassing MSBuild entirely.
   - Fallback: If the DLL is not found (e.g., local dev without a prior build), the server logs a warning and falls back to `dotnet run`.
+  - **Known Gap (see PENDING):** Even with `dotnet exec`, a second failure path exists via LEAN's `AppDomain.BaseDirectory` config fallback reading the MSBuild-copied original `config.json` instead of our patched version. Fix: pass `--algorithm-language Python` as CLI arg to LEAN (see LL-15).
 - **Yahoo Finance Rate-Limit Handling Fixed:**
   - Root cause: Render.com's shared outbound IP is frequently rate-limited by Yahoo Finance. The original code silently returned on empty data, causing LEAN to launch with no market data and producing a misleading "0 trades" result.
   - Fix: `_ensure_data()` now retries up to 3 times with exponential backoff (2s, 4s+jitter). On exhaustion, it raises `RuntimeError` with a clear user-facing message, aborting the backtest before LEAN is even launched.
@@ -68,7 +69,14 @@ The **QuantConnect Interactive Backtesting UI** acts as a bridge between a power
   - LEAN runtime artifacts (data-monitor reports, failed/succeeded data request logs) are explicitly ignored.
 
 ### 2.2 What is PENDING / NEXT STEPS
-- **Pre-warmed Ticker Cache (Optional):** Yahoo Finance rate-limiting on Render.com's shared IP means the first download of any new ticker may still fail even with retries. Consider pre-bundling a baseline set of commonly used tickers (GOOG, AAPL, AOT.BK) as ZIP files in the Docker image so the first backtest always succeeds without a network call.
+
+> [!CAUTION]
+> The two items below are **known active bugs** identified from deep log analysis (28 Jul 2026). They must be implemented before the backtesting pipeline is considered stable on Render.com.
+
+- **[BUG] CLI Args Override for LEAN Algorithm Settings (LL-15):**
+  LEAN's `Config.cs` has an `AppDomain.BaseDirectory` fallback that reads the MSBuild-copied `config.json` from `bin/Debug/net*/` instead of our runtime-patched `/app/Launcher/config.json`. When this fallback triggers, `algorithm-language` defaults to `"CSharp"`, causing `TryCreateILAlgorithm` to fire on the `.py` file and producing `BadImageFormatException`. **Fix:** Append `--algorithm-language Python --algorithm-type-name MultiSignalStrategy --algorithm-location /app/Algorithm.Python/MultiSignalStrategy.py` as explicit CLI arguments to the LEAN subprocess in `server.py`. LEAN merges CLI args on top of config.json at startup, making them the highest-priority override. Also add a stub `Algorithm.CSharp.csproj` in `Dockerfile.render` to suppress the MSB9008 warning.
+- **[BUG] Pre-bundled Ticker Cache for Yahoo Finance Rate-Limiting (LL-16):**
+  Render.com's persistent service IP is rate-limited by Yahoo Finance. The retry logic (LL-14) helps for transient limits but cannot overcome persistent IP-level blocks. **Fix:** Add a `RUN python3 -c "import yfinance..."` step to `Dockerfile.render` to pre-download GOOG, AAPL, AOT.BK, PTT.BK, SCB.BK, KBANK.BK during Docker image build (using ephemeral builder IPs). Ticker ZIPs are baked into the image and available at startup without any network call.
 - **Advanced Asset Classes:** Currently, data downloading is tuned for US & International Equities (including `.BK` Thai stocks). If crypto or forex is needed, the `yfinance` parser can be extended to map to those specific LEAN data folder structures.
 - **Git LFS (Optional):** GitHub flagged `Data/option/usa/minute/aapl/20140606_quote_american.zip` (53.89 MB) as exceeding the 50 MB recommendation. If more large data files are added, consider enabling Git LFS.
 - **Production WSGI Server:** The current Flask development server works but consider switching to `gunicorn` for production-grade request handling on Render.
@@ -110,8 +118,8 @@ To add a new condition (e.g., `BCOND14`):
 | `backtest_ui/index.html` | ✅ DONE | Interactive HTML layout with dynamic date pickers and 3-tab chart. |
 | `backtest_ui/style.css` | ✅ DONE | Dark mode, glassmorphic styling with dynamic PnL color coding. |
 | `backtest_ui/app.js` | ✅ DONE | UI logic; dynamic 6-year date setup, 3 chart views, dynamic metric card colors. |
-| `backtest_ui/server.py` | ✅ DONE | Flask bridge. `dotnet exec` (pre-built DLL), retry+abort on yfinance rate-limit, Linux `.so` DLL detection. |
-| `Dockerfile.render` | ✅ DONE | Docker image for Render.com. DLL verification step added; silent build error swallow removed. |
+| `backtest_ui/server.py` | ⚠️ PARTIAL | `dotnet exec` + retry+abort implemented. **CLI args override pending (LL-15).** |
+| `Dockerfile.render` | ⚠️ PARTIAL | DLL verification added. **Pre-bundled ticker cache + stub CSharp proj pending (LL-16).** |
 | `Launcher/config.json` | ✅ DONE | Default paths updated to Docker `/app/...` paths (patched at runtime by server.py). |
 | `.gitignore` | ✅ DONE | Updated with whitelist rules for custom project files. |
 | `.dockerignore` | ✅ DONE | Updated to include `backtest_ui/` in Docker build context. |

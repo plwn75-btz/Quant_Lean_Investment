@@ -84,3 +84,34 @@
 1. Wrapped the `yf.download()` call in a retry loop (max 3 attempts) with **exponential backoff + random jitter** (2, 4+ seconds between retries).
 2. After all retries are exhausted with an empty result, `_ensure_data()` now raises `RuntimeError` with a human-readable message instead of silently returning. This propagates to `_run_lean()` and is returned as a 500 response with the clear message: *"No market data available for 'X' after 3 attempts. Yahoo Finance may be rate-limiting this server IP..."*
 **Lesson:** Cloud platform IPs are frequently pre-blocked or heavily rate-limited by external APIs. Always implement retry-with-backoff, and **always surface a hard error rather than proceeding with empty data**. A silent "0 trades" result is far worse than a clear failure message.
+
+## LL-15: LEAN `AppDomain.BaseDirectory` Config Fallback — CLI Args Are the Only Guarantee
+**Problem:** Even after switching to `dotnet exec` (pre-built DLL), the `TryCreateILAlgorithm` error can still occur via a second failure path. LEAN's `Config.cs` reads `config.json` using a two-step lookup:
+1. `Directory.GetCurrentDirectory() + "/config.json"` (our patched file at `/app/Launcher/config.json`)
+2. `AppDomain.CurrentDomain.BaseDirectory + "/config.json"` (MSBuild output copy at `/app/Launcher/bin/Debug/net*/config.json`)
+
+When `dotnet run` is used (e.g., as a fallback when the pre-built DLL isn't found), MSBuild copies the **original unpatched `config.json`** from the repo into `bin/Debug/net*/` via a `CopyToOutputDirectory` rule in the `.csproj`. If the CWD lookup fails for any reason — race condition, Docker path quirk, SDK version difference — LEAN silently falls back to the output-directory copy, which has `algorithm-language: "CSharp"` as the default. This routes the `.py` file through the C# IL assembly loader (`TryCreateILAlgorithm`) and produces `System.BadImageFormatException: Bad IL format` without ever trying the Python loader.
+
+**Root cause chain:**
+```
+MSBuild copies config.json to bin/Debug/ → LEAN AppDomain fallback reads it
+    → algorithm-language defaults to "CSharp"
+    → JobQueue.Language = Language.CSharp
+    → Loader._language = Language.CSharp  
+    → TryCreateILAlgorithm fires on .py file
+    → BadImageFormatException
+    → TryCreatePythonAlgorithm is NEVER called
+```
+
+**Fix:** Pass `--algorithm-language Python --algorithm-type-name MultiSignalStrategy --algorithm-location <path>` as **explicit CLI arguments** to the LEAN process. LEAN's startup sequence merges CLI args ON TOP of config.json via `Config.MergeCommandLineArgumentsWithConfig()`, making CLI args the highest-priority override. This eliminates the config file race entirely — Python loader is guaranteed regardless of which config.json LEAN reads.
+- For `dotnet exec <dll>`: args are passed directly after the DLL path.
+- For `dotnet run` fallback: args are passed after `--` separator (MSBuild boundary).
+
+**Lesson:** Never rely solely on a config file for critical runtime settings in Docker. Always reinforce the most critical settings (algorithm language, algorithm path) as **command-line arguments** to the subprocess. Config files can be overwritten, cached, or read from an unexpected path; CLI args cannot be silently overridden.
+
+## LL-16: Pre-Bundle Ticker Data at Docker Build Time to Bypass Runtime Rate-Limiting
+**Problem:** Render.com assigns persistent outbound IPs to its web services. Over time, these IPs get rate-limited by Yahoo Finance because many other tenants use the same IP pool. Any runtime download of a new ticker will fail with `YFRateLimitError`, and even the retry logic (LL-14) exhausts all attempts. For Thai SET tickers (`AOT.BK`, `PTT.BK`, etc.) this is especially problematic since they are always "new" on a fresh container.
+**Fix:** Add a `RUN python3 -c "import yfinance..."` step in `Dockerfile.render` to pre-download common tickers (GOOG, AAPL, AOT.BK, PTT.BK, SCB.BK, KBANK.BK) during the Docker **image build phase**. Docker build runs on ephemeral builder IPs (not the service's persistent IP), which are far less likely to be pre-blocked. The resulting `.zip` files are baked into the image layers and available immediately at container startup.
+- The existing stale-data check in `_ensure_data()` still handles re-downloads for expired cached data (>5 days behind requested end date).
+- Build failures for individual tickers are non-fatal (the script logs `WARN:` and continues), so a single unavailable ticker does not block the image build.
+**Lesson:** For cloud deployments where runtime network access to external APIs is unreliable, move data acquisition to build time where possible. Docker build environments use transient IPs with clean rate-limit histories, making them far more reliable for bulk data fetches than persistent server IPs.
