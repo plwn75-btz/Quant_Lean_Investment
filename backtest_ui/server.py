@@ -539,6 +539,15 @@ def _patch_config(params: dict):
     for k, v in params.items():
         cfg["parameters"][k] = str(v)
 
+    # Add the DLL output directory to python-additional-paths so Python can find AlgorithmImports.py
+    dll_path = _get_lean_dll()
+    if dll_path:
+        dll_dir = str(Path(dll_path).parent.resolve()).replace("\\", "/")
+        existing_paths = cfg.get("python-additional-paths", [])
+        if dll_dir not in existing_paths:
+            existing_paths.append(dll_dir)
+        cfg["python-additional-paths"] = existing_paths
+
     # Write back clean JSON (no comments, ASCII-safe so no encoding issues)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=True)
