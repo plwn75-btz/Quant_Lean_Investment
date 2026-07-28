@@ -543,6 +543,18 @@ def _patch_config(params: dict):
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=True)
 
+    # Write to all MSBuild output locations (AppDomain.BaseDirectory fallback)
+    import glob
+    output_configs = glob.glob(str(LAUNCHER_DIR / "bin" / "Debug" / "*" / "config.json"))
+    output_configs += glob.glob(str(LAUNCHER_DIR / "bin" / "Release" / "*" / "config.json"))
+    for out_cfg_path in output_configs:
+        try:
+            with open(out_cfg_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=True)
+            _log(f"[CONFIG] Also patched output config: {out_cfg_path}")
+        except Exception as e:
+            _log(f"[CONFIG] Warning: Could not patch {out_cfg_path}: {e}")
+
     _log(f"[CONFIG] config.json patched with {len(params)} parameters")
 
 
