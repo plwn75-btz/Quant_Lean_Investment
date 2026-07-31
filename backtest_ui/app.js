@@ -230,24 +230,18 @@ async function runBacktest() {
       body: JSON.stringify(params),
     });
 
-    if (!res.ok) {
+    if (!res.ok && res.status !== 202) {
       const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
       throw new Error(err.error || 'Request failed');
     }
 
     const data = await res.json();
-    
-    setStatus('done');
-    setProgress(100);
-    btn.disabled = false;
-    btn.innerHTML = '<div class="btn-shimmer"></div>▶ Run Backtest';
-    
     if (data.log) {
       appendLog(data.log);
     }
     
-    showToast('🎉 Backtest complete!', 'success');
-    renderResults(data.results || data);
+    // Start polling status asynchronously
+    startPolling();
 
   } catch (err) {
     setStatus('error');

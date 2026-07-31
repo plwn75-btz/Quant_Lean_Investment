@@ -137,15 +137,16 @@ def api_run_backtest():
         _state["error"]    = None
         _state["progress"] = 0
 
-    try:
-        results = _run_lean(params)
-        with _lock:
-            log_copy = list(_state["log"])
-        return jsonify({"results": results, "log": log_copy}), 200
-    except Exception as e:
-        with _lock:
-            log_copy = list(_state["log"])
-        return jsonify({"error": str(e), "log": log_copy}), 500
+    def _worker():
+        try:
+            _run_lean(params)
+        except Exception:
+            pass  # _run_lean handles error state update & logging internally
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+    return jsonify({"status": "running", "message": "Backtest launched successfully"}), 202
 
 
 # =============================================================================
@@ -244,27 +245,26 @@ def _ensure_data(ticker: str, end_date: str = None):
     # If the zip exists, peek at the last bar date.  Re-download if the last
     # bar is more than 5 calendar days before the requested end date (giving
     # a small buffer for weekends / holidays).
+    has_cached_zip = False
+    last_bar = None
     if zip_path.exists():
         try:
             with _zf.ZipFile(zip_path) as z:
                 name    = z.namelist()[0]
                 content = z.read(name).decode("utf-8", errors="replace")
             lines    = [l for l in content.strip().splitlines() if l.strip()]
-            # Parse "YYYYMMDD" prefix
             raw_date = lines[-1][:8]   # e.g. '20241230'
             last_bar = date(int(raw_date[:4]), int(raw_date[4:6]), int(raw_date[6:8]))
+            has_cached_zip = True
 
             gap_days = (target_end - last_bar).days
             if gap_days <= 5:
                 _log(f"[DATA] {ticker}: cached data is current (last bar {last_bar}, target {target_end})")
                 return
             else:
-                _log(f"[DATA] {ticker}: cached data is stale (last bar {last_bar}, target {target_end}, gap {gap_days}d). Re-downloading...")
-                zip_path.unlink()   # delete stale zip so we re-download below
+                _log(f"[DATA] {ticker}: cached data is stale (last bar {last_bar}, target {target_end}, gap {gap_days}d). Attempting refresh...")
         except Exception as e:
             _log(f"[DATA] {ticker}: could not inspect existing zip ({e}). Re-downloading...")
-            if zip_path.exists():
-                zip_path.unlink()
 
     else:
         _log(f"[DATA] {ticker} not found locally. Downloading from Yahoo Finance...")
@@ -286,7 +286,6 @@ def _ensure_data(ticker: str, end_date: str = None):
                 df = yf.download(ticker, start="1998-01-01", end=download_end, progress=False)
                 if df is not None and not df.empty:
                     break
-                # Empty result (may be a soft rate-limit or unknown ticker)
                 _log(f"[DATA] Empty result from Yahoo Finance for {ticker} (attempt {attempt}/{max_attempts})")
             except Exception as dl_err:
                 _log(f"[DATA] Download error for {ticker} (attempt {attempt}/{max_attempts}): {dl_err}")
@@ -297,8 +296,11 @@ def _ensure_data(ticker: str, end_date: str = None):
                 _log(f"[DATA] Retrying in {wait_secs:.1f}s...")
                 time.sleep(wait_secs)
 
-        # ── Hard abort if no data after all retries ──────────────────────────
+        # ── Fallback to cached zip if available on download failure/rate-limit ──
         if df is None or df.empty:
+            if has_cached_zip:
+                _log(f"[DATA] Warning: Yahoo Finance rate-limited or unavailable for '{ticker}'. Falling back to cached data (last bar {last_bar}).")
+                return
             raise RuntimeError(
                 f"No market data available for '{ticker}' after {max_attempts} attempts. "
                 "Yahoo Finance may be rate-limiting this server IP. "

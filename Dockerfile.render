@@ -98,6 +98,7 @@ PYEOF
 ENV PORT=5000
 EXPOSE 5000
 
-# 6. Launch the Flask server (LEAN reads config.json relative to /app/Launcher)
+# 6. Launch the Flask server via production gunicorn WSGI server
 WORKDIR /app
-CMD ["python", "backtest_ui/server.py"]
+CMD ["sh", "-c", "gunicorn --workers 2 --threads 4 --bind 0.0.0.0:${PORT:-5000} backtest_ui.server:app"]
+

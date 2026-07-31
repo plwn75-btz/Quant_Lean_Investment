@@ -171,12 +171,12 @@ class MultiSignalStrategy(QCAlgorithm):
         self._in_position = False
         self._last_buy_bar_open = False
 
-        # Warm up to longest indicator
-        warm_up = max(
-            self._ema200_period,
-            self._hwks52_period,
-            self._lwks52_period,
-        )
+        # Warm up to longest active indicator
+        warm_up = self._ema200_period
+        if self._buy_conds.get(8, 0) == 1:
+            warm_up = max(warm_up, self._hwks52_period)
+        if self._sell_conds.get(7, 0) == 1:
+            warm_up = max(warm_up, self._lwks52_period)
         self.set_warm_up(warm_up, Resolution.DAILY)
 
         # ── Custom chart ───────────────────────────────────────────────────

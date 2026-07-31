@@ -1,7 +1,7 @@
 # QuantConnect Interactive Backtesting UI
 ## Technical & Operational Handoff Report
 
-**Last Updated:** 28 Jul 2026 (11:47 local)
+**Last Updated:** 28 Jul 2026 (14:57 local)
 
 ---
 
@@ -55,7 +55,7 @@ The **QuantConnect Interactive Backtesting UI** acts as a bridge between a power
   - Root cause: `dotnet run --project Launcher/` triggered a full MSBuild recompile on every backtest inside the Docker container. With `Algorithm.CSharp.csproj` absent (MSB9008), the LEAN job-queue routed `MultiSignalStrategy.py` through the C# IL loader instead of the Python loader, causing `System.BadImageFormatException: Bad IL format`.
   - Fix: Added `_get_lean_dll()` to `server.py` that scans `Launcher/bin/Debug/*/` and `Launcher/bin/Release/*/` for the pre-built DLL. Execution is now `dotnet <dll_path>` (dotnet exec), bypassing MSBuild entirely.
   - Fallback: If the DLL is not found (e.g., local dev without a prior build), the server logs a warning and falls back to `dotnet run`.
-  - **Known Gap (see PENDING):** Even with `dotnet exec`, a second failure path exists via LEAN's `AppDomain.BaseDirectory` config fallback reading the MSBuild-copied original `config.json` instead of our patched version. Fix: pass `--algorithm-language Python` as CLI arg to LEAN (see LL-15).
+  - **Config Initialization Race Condition (LL-17):** The `JobQueue` class locks in the configuration (reading from `AppDomain.BaseDirectory`) *before* CLI arguments are merged. To permanently prevent the Engine from falling back to C# IL mode, `server.py` now performs a **dual-write patch** — overwriting both `/app/Launcher/config.json` and the MSBuild-copied `/app/Launcher/bin/Debug/*/*/config.json` before LEAN is launched.
 - **Yahoo Finance Rate-Limit Handling Fixed:**
   - Root cause: Render.com's shared outbound IP is frequently rate-limited by Yahoo Finance. The original code silently returned on empty data, causing LEAN to launch with no market data and producing a misleading "0 trades" result.
   - Fix: `_ensure_data()` now retries up to 3 times with exponential backoff (2s, 4s+jitter). On exhaustion, it raises `RuntimeError` with a clear user-facing message, aborting the backtest before LEAN is even launched.
