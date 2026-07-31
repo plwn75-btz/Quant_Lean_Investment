@@ -127,3 +127,20 @@ MSBuild copies config.json to bin/Debug/ → LEAN AppDomain fallback reads it
 **Root cause:** LEAN copies `AlgorithmImports.py` to the build output directory (e.g. `Launcher/bin/Debug/net*`) during the `dotnet build` step. At runtime, `PythonInitializer` automatically appends `Environment.CurrentDirectory` and the algorithm directory to `sys.path`. Because we execute `dotnet exec` with the working directory set to `/app/Launcher`, Python does not automatically search the MSBuild `bin/Debug` folders where the DLL and `AlgorithmImports.py` actually reside.
 **Fix:** Modified `server.py` `_patch_config()` to detect the physical directory containing the pre-built `QuantConnect.Lean.Launcher.dll` and dynamically append it to the `python-additional-paths` array in `config.json` before launch.
 **Lesson:** Bypassing `dotnet run` in favor of `dotnet exec` alters the default paths LEAN injects into Python. You must explicitly configure `python-additional-paths` in `config.json` to include the output directory so Python can resolve internally bundled modules like `AlgorithmImports.py`.
+
+## LL-19: Synchronous Subprocess Blocking in Single-Threaded WSGI Server
+**Problem:** Running `_run_lean()` directly inside the HTTP `POST /api/run-backtest` request handler blocks the Werkzeug dev server event loop. On cloud platforms like Render.com, long execution times cause HTTP proxy timeouts, drop connections, and prevent frontend status polling (`/api/status`) from acquiring `_lock`.
+**Fix:**
+1. Refactored `api_run_backtest()` to spawn `_run_lean()` in a background daemon thread (`threading.Thread`) and return HTTP `202 Accepted` immediately (~50ms).
+2. Deployed multi-worker `gunicorn` (`--workers 2 --threads 4`) in `Dockerfile.render` to process concurrent requests smoothly.
+**Lesson:** Never run heavy subprocess calls or long-running computations directly on an HTTP request thread. Launch background workers and stream progress to the UI via asynchronous polling endpoints.
+
+## LL-20: Soft Fallback for Cached Market Data on API Rate Limiting
+**Problem:** When `_ensure_data()` detected a cached `.zip` file with a last bar >5 days old, it deleted the zip file before attempting to download fresh data from Yahoo Finance. On Render.com, shared outbound server IPs are aggressively rate-limited by Yahoo Finance. If the download failed, the user was left with no data file at all, causing a hard crash.
+**Fix:** Retain cached zip files during refresh attempts. If Yahoo Finance rate-limits or returns an empty result, log a warning and fall back to using the existing cached data file instead of failing.
+**Lesson:** Never delete cached data until a replacement has been successfully downloaded and validated. Preserving slightly older data allows backtests to proceed safely when external APIs are rate-limited or unreachable.
+
+## LL-21: Signal Bar Close vs Fill Price Order Execution Divergence
+**Problem:** In `MultiSignalStrategy.py`, trade log entries capture `Close` prices when a signal fires (`BUY | Close=X`). LEAN's engine executes market orders on the *next bar's Open* price (or fill price). On volatile assets, computing multi-year compounded trade returns using signal-bar Close prices introduces minor variance compared to LEAN's native `End Equity` report.
+**Lesson:** For 100% exact mathematical matching between external UI calculators and LEAN's C# engine portfolio report, record actual execution prices from LEAN's `OnOrderEvent` handler (`orderEvent.FillPrice`) rather than bar close prices.
+
