@@ -144,3 +144,15 @@ MSBuild copies config.json to bin/Debug/ → LEAN AppDomain fallback reads it
 **Problem:** In `MultiSignalStrategy.py`, trade log entries capture `Close` prices when a signal fires (`BUY | Close=X`). LEAN's engine executes market orders on the *next bar's Open* price (or fill price). On volatile assets, computing multi-year compounded trade returns using signal-bar Close prices introduces minor variance compared to LEAN's native `End Equity` report.
 **Lesson:** For 100% exact mathematical matching between external UI calculators and LEAN's C# engine portfolio report, record actual execution prices from LEAN's `OnOrderEvent` handler (`orderEvent.FillPrice`) rather than bar close prices.
 
+## LL-22: Non-Nested `bin/Debug` DLL Path Glob Mismatch & `AlgorithmImports` Fallback Cascade
+**Problem:** In Docker container environment on Render.com, `QuantConnect.Lean.Launcher.csproj` builds output directly to `Launcher/bin/Debug/QuantConnect.Lean.Launcher.dll` because `<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>` is specified in the `.csproj`.
+The helper function `_get_lean_dll()` previously used `Launcher/bin/Debug/*/QuantConnect.Lean.Launcher.dll` (expecting a target framework subdirectory like `net10.0`). Because there was no middle directory, `_get_lean_dll()` returned `None`.
+This triggered a 2-step cascade failure:
+1. `server.py` fell back to `dotnet run`, triggering slow runtime recompiles and MSB9008 warnings.
+2. Because `dll_path` was `None`, `python-additional-paths` in `config.json` was NOT updated with the output folder. Python failed with `No module named 'AlgorithmImports'`.
+**Fix:**
+1. Updated `_get_lean_dll()` glob patterns to include both non-nested (`Launcher/bin/Debug/QuantConnect.Lean.Launcher.dll`) and nested (`Launcher/bin/Debug/*/QuantConnect.Lean.Launcher.dll`) paths.
+2. Updated `_patch_config()` to unconditionally include `Common/`, `Launcher/bin/Debug/`, `Launcher/bin/Release/`, and `dll_dir` in `python-additional-paths`.
+3. Updated `output_configs` patching in `_patch_config()` to include non-nested `config.json` paths.
+**Lesson:** Always account for both `<AppendTargetFrameworkToOutputPath>false` (flat `bin/Debug/`) and standard nested (`bin/Debug/net*/`) output structures when scanning for build artifacts in .NET applications. Never rely solely on optional runtime lookups for core Python dependencies—always populate fallback search paths (`Common/`, `bin/Debug/`) in `python-additional-paths`.
+

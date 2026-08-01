@@ -178,7 +178,9 @@ def _get_lean_dll():
     """
     import glob
     patterns = [
+        str(LAUNCHER_DIR / "bin" / "Debug" / "QuantConnect.Lean.Launcher.dll"),
         str(LAUNCHER_DIR / "bin" / "Debug" / "*" / "QuantConnect.Lean.Launcher.dll"),
+        str(LAUNCHER_DIR / "bin" / "Release" / "QuantConnect.Lean.Launcher.dll"),
         str(LAUNCHER_DIR / "bin" / "Release" / "*" / "QuantConnect.Lean.Launcher.dll"),
     ]
     for pattern in patterns:
@@ -541,14 +543,22 @@ def _patch_config(params: dict):
     for k, v in params.items():
         cfg["parameters"][k] = str(v)
 
-    # Add the DLL output directory to python-additional-paths so Python can find AlgorithmImports.py
+    # Add candidate directories containing AlgorithmImports.py to python-additional-paths
+    existing_paths = cfg.get("python-additional-paths", [])
+    candidate_dirs = [
+        str((PROJECT_DIR / "Common").resolve()).replace("\\", "/"),
+        str((LAUNCHER_DIR / "bin" / "Debug").resolve()).replace("\\", "/"),
+        str((LAUNCHER_DIR / "bin" / "Release").resolve()).replace("\\", "/"),
+    ]
     dll_path = _get_lean_dll()
     if dll_path:
         dll_dir = str(Path(dll_path).parent.resolve()).replace("\\", "/")
-        existing_paths = cfg.get("python-additional-paths", [])
-        if dll_dir not in existing_paths:
-            existing_paths.append(dll_dir)
-        cfg["python-additional-paths"] = existing_paths
+        candidate_dirs.insert(0, dll_dir)
+
+    for c_dir in candidate_dirs:
+        if c_dir not in existing_paths and Path(c_dir).exists():
+            existing_paths.append(c_dir)
+    cfg["python-additional-paths"] = existing_paths
 
     # Write back clean JSON (no comments, ASCII-safe so no encoding issues)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -556,9 +566,16 @@ def _patch_config(params: dict):
 
     # Write to all MSBuild output locations (AppDomain.BaseDirectory fallback)
     import glob
-    output_configs = glob.glob(str(LAUNCHER_DIR / "bin" / "Debug" / "*" / "config.json"))
-    output_configs += glob.glob(str(LAUNCHER_DIR / "bin" / "Release" / "*" / "config.json"))
-    for out_cfg_path in output_configs:
+    output_configs = []
+    for pat in [
+        str(LAUNCHER_DIR / "bin" / "Debug" / "config.json"),
+        str(LAUNCHER_DIR / "bin" / "Debug" / "*" / "config.json"),
+        str(LAUNCHER_DIR / "bin" / "Release" / "config.json"),
+        str(LAUNCHER_DIR / "bin" / "Release" / "*" / "config.json"),
+    ]:
+        output_configs.extend(glob.glob(pat))
+
+    for out_cfg_path in set(output_configs):
         try:
             with open(out_cfg_path, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, indent=2, ensure_ascii=True)
