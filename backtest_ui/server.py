@@ -543,22 +543,39 @@ def _patch_config(params: dict):
     for k, v in params.items():
         cfg["parameters"][k] = str(v)
 
-    # Add candidate directories containing AlgorithmImports.py to python-additional-paths
-    existing_paths = cfg.get("python-additional-paths", [])
+    # Add candidate directories containing AlgorithmImports.py and QuantConnect.*.dll
+    # to python-additional-paths.
+    # NOTE: LEAN's PythonInitializer.cs iterates through python-additional-paths and
+    # calls sys.path.insert(0, path) on each entry sequentially, which REVERSES their
+    # order in sys.path. Placing dll_dir (Launcher/bin/Debug) LAST in this list ensures
+    # it ends up FIRST in sys.path where both AlgorithmImports.py and all QuantConnect.*.dll
+    # assemblies reside.
     candidate_dirs = [
         str((PROJECT_DIR / "Common").resolve()).replace("\\", "/"),
-        str((LAUNCHER_DIR / "bin" / "Debug").resolve()).replace("\\", "/"),
         str((LAUNCHER_DIR / "bin" / "Release").resolve()).replace("\\", "/"),
+        str((LAUNCHER_DIR / "bin" / "Debug").resolve()).replace("\\", "/"),
     ]
     dll_path = _get_lean_dll()
     if dll_path:
-        dll_dir = str(Path(dll_path).parent.resolve()).replace("\\", "/")
-        candidate_dirs.insert(0, dll_dir)
+        dll_dir_path = Path(dll_path).parent.resolve()
+        dll_dir = str(dll_dir_path).replace("\\", "/")
+        candidate_dirs.append(dll_dir)
+        # Ensure the latest resilient AlgorithmImports.py is present in dll_dir
+        src_imports = PROJECT_DIR / "Common" / "AlgorithmImports.py"
+        dst_imports = dll_dir_path / "AlgorithmImports.py"
+        if src_imports.exists():
+            try:
+                shutil.copyfile(src_imports, dst_imports)
+            except Exception:
+                pass
 
+    ordered_paths = []
     for c_dir in candidate_dirs:
-        if c_dir not in existing_paths and Path(c_dir).exists():
-            existing_paths.append(c_dir)
-    cfg["python-additional-paths"] = existing_paths
+        if Path(c_dir).exists():
+            if c_dir in ordered_paths:
+                ordered_paths.remove(c_dir)
+            ordered_paths.append(c_dir)
+    cfg["python-additional-paths"] = ordered_paths
 
     # Write back clean JSON (no comments, ASCII-safe so no encoding issues)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:

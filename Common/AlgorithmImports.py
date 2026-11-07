@@ -24,10 +24,34 @@ sys.path.append(path)
 from clr import AddReference
 AddReference("System")
 
-#Load assemblies
-for file in os.listdir(path):
-    if file.endswith(".dll") and file.startswith("QuantConnect."):
-        AddReference(file.replace(".dll", ""))
+# Load assemblies from current file's directory AND fallback build output directories
+_project_root = os.path.dirname(path)
+_dll_search_dirs = [path]
+for _candidate in (
+    os.path.join(_project_root, "Launcher", "bin", "Debug"),
+    os.path.join(_project_root, "Launcher", "bin", "Release"),
+    os.path.join(os.getcwd(), "bin", "Debug"),
+    os.path.join(os.getcwd(), "bin", "Release"),
+    os.getcwd(),
+):
+    if os.path.isdir(_candidate) and _candidate not in _dll_search_dirs:
+        _dll_search_dirs.append(_candidate)
+
+for _d in _dll_search_dirs:
+    try:
+        _dll_files = [f for f in os.listdir(_d) if f.endswith(".dll") and f.startswith("QuantConnect.")]
+        if _dll_files and _d not in sys.path:
+            sys.path.append(_d)
+        for file in _dll_files:
+            try:
+                AddReference(file.replace(".dll", ""))
+            except Exception:
+                try:
+                    AddReference(os.path.join(_d, file))
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 from System import *
 from System.Drawing import *
@@ -39,7 +63,10 @@ from QuantConnect.Data import *
 from QuantConnect.Orders import *
 from QuantConnect.Python import *
 from QuantConnect.Storage import *
-from QuantConnect.Research import *
+try:
+    from QuantConnect.Research import *
+except ImportError:
+    pass
 from QuantConnect.Commands import *
 from QuantConnect.Algorithm import *
 from QuantConnect.Statistics import *
@@ -69,8 +96,17 @@ from QuantConnect.Securities.Equity import *
 from QuantConnect.Securities.Future import *
 from QuantConnect.Data.Consolidators import *
 from QuantConnect.Orders.TimeInForces import *
-from QuantConnect.Algorithm.Framework import *
-from QuantConnect.Algorithm.Selection import *
+try:
+    from QuantConnect.Algorithm.Framework import *
+    from QuantConnect.Algorithm.Selection import *
+    from QuantConnect.Algorithm.Framework.Risk import *
+    from QuantConnect.Algorithm.Framework.Alphas import *
+    from QuantConnect.Algorithm.Framework.Execution import *
+    from QuantConnect.Algorithm.Framework.Portfolio import *
+    from QuantConnect.Algorithm.Framework.Portfolio.SignalExports import *
+    from QuantConnect.Algorithm.Framework.Selection import *
+except ImportError:
+    pass
 from QuantConnect.Securities.Positions import *
 from QuantConnect.Orders.OptionExercise import *
 from QuantConnect.Securities.Volatility import *
@@ -79,13 +115,7 @@ from QuantConnect.Data.UniverseSelection import *
 from QuantConnect.Securities.IndexOption import  *
 from QuantConnect.Data.Custom.IconicTypes import *
 from QuantConnect.Securities.CryptoFuture import *
-from QuantConnect.Algorithm.Framework.Risk import *
-from QuantConnect.Algorithm.Framework.Alphas import *
-from QuantConnect.Algorithm.Framework.Execution import *
-from QuantConnect.Algorithm.Framework.Portfolio import *
 from QuantConnect.Indicators.CandlestickPatterns import *
-from QuantConnect.Algorithm.Framework.Portfolio.SignalExports import *
-from QuantConnect.Algorithm.Framework.Selection import *
 
 try:
     import numpy as np

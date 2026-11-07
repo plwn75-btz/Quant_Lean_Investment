@@ -72,19 +72,11 @@ def test_3_data_caching_and_fallback():
 
 def test_4_server_api_concurrency():
     print("\n--- TEST 4: Server API & Concurrency Test ---")
-    # Start server in daemon thread
-    def run_flask():
-        server.app.run(host="127.0.0.1", port=5050, debug=False, use_reloader=False)
-    
-    server_thread = threading.Thread(target=run_flask, daemon=True)
-    server_thread.start()
-    time.sleep(2) # Give server time to bind
-    
-    base_url = "http://127.0.0.1:5050"
+    client = server.app.test_client()
     
     # Check /api/status
-    res = requests.get(f"{base_url}/api/status")
-    print(f"GET /api/status -> {res.status_code}: {res.json()}")
+    res = client.get("/api/status")
+    print(f"GET /api/status -> {res.status_code}: {res.get_json()}")
     assert res.status_code == 200, "Status endpoint failed"
     
     # Launch first backtest
@@ -97,24 +89,26 @@ def test_4_server_api_concurrency():
         "end-month": "02",
         "end-day": "01",
         "initial-cash": "100000",
-        "buy-condition-1": "true"
+        "bcond1": "1",
+        "scond1": "1"
     }
     
-    res1 = requests.post(f"{base_url}/api/run-backtest", json=payload)
-    print(f"POST /api/run-backtest (Req 1) -> {res1.status_code}: {res1.json()}")
-    assert res1.status_code == 202, f"Request 1 failed: {res1.text}"
+    res1 = client.post("/api/run-backtest", json=payload)
+    print(f"POST /api/run-backtest (Req 1) -> {res1.status_code}: {res1.get_json()}")
+    assert res1.status_code == 202, f"Request 1 failed: {res1.data.decode()}"
     
     # Send simultaneous second backtest request (should be rejected with 409 Conflict)
-    res2 = requests.post(f"{base_url}/api/run-backtest", json=payload)
-    print(f"POST /api/run-backtest (Req 2 while running) -> {res2.status_code}: {res2.json()}")
+    res2 = client.post("/api/run-backtest", json=payload)
+    print(f"POST /api/run-backtest (Req 2 while running) -> {res2.status_code}: {res2.get_json()}")
     assert res2.status_code == 409, f"Expected 409 Conflict for concurrent request, got {res2.status_code}"
     print("PASS: Concurrent backtest request correctly rejected with 409 Conflict!")
     
-    # Poll status until complete or timeout (max 45 seconds)
+    # Poll status until complete or timeout (max 60 seconds)
     start_t = time.time()
     completed = False
-    while time.time() - start_t < 45:
-        st = requests.get(f"{base_url}/api/status").json()
+    st = {}
+    while time.time() - start_t < 60:
+        st = client.get("/api/status").get_json()
         status = st.get("status")
         progress = st.get("progress")
         print(f"Status: {status} | Progress: {progress}%")
@@ -134,9 +128,11 @@ def test_4_server_api_concurrency():
             print("FAIL: AlgorithmImports import error still occurring!")
             sys.exit(1)
         else:
-            print(f"NOTICE: Backtest exited with status 'error': {err_msg}")
+            print(f"FAIL: Backtest exited with status 'error': {err_msg}")
+            sys.exit(1)
     else:
-        print("TIMEOUT: Backtest exceeded 45s threshold (still running in background).")
+        print("TIMEOUT: Backtest exceeded 60s threshold (still running in background).")
+        sys.exit(1)
 
 if __name__ == "__main__":
     print("==================================================")
