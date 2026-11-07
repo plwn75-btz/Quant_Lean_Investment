@@ -51,6 +51,7 @@ def _force_utf8_streams():
 _force_utf8_streams()
 
 # ── Standard imports ──────────────────────────────────────────────────────────
+import gc
 import json
 import os
 import re
@@ -83,6 +84,23 @@ _state = {
     "progress": 0,        # 0-100
 }
 _lock = threading.Lock()
+_active_proc = None
+
+
+def _terminate_proc(proc):
+    """Safely terminate and reap a child subprocess if it is still running."""
+    if proc is None:
+        return
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+                proc.wait(timeout=2)
+    except Exception:
+        pass
 
 
 # =============================================================================
@@ -328,17 +346,32 @@ def _ensure_data(ticker: str, end_date: str = None):
         data_dir.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr(f"{ticker.lower()}.csv", csv_content)
-        _log(f"[DATA] Successfully downloaded and saved {ticker} ({len(csv_lines)} bars, up to {csv_lines[-1][:8] if csv_lines else 'N/A'})")
+        bar_count = len(csv_lines)
+        last_bar_str = csv_lines[-1][:8] if csv_lines else "N/A"
+        del df, csv_lines, csv_content
+        gc.collect()
+        _log(f"[DATA] Successfully downloaded and saved {ticker} ({bar_count} bars, up to {last_bar_str})")
     except RuntimeError:
         raise   # re-raise our hard-abort error directly to _run_lean
     except Exception as e:
         raise RuntimeError(f"[DATA] Failed to download {ticker}: {e}") from e
+    finally:
+        gc.collect()
 
 
 
 def _run_lean(params: dict):
     """Patch config.json, run LEAN, collect results."""
+    global _active_proc
+    proc = None
     try:
+        # Ensure any previous lingering LEAN child process is terminated first
+        with _lock:
+            old_proc = _active_proc
+            _active_proc = None
+        _terminate_proc(old_proc)
+        gc.collect()
+
         data_source = params.get("data-source", "auto")
 
         # Resolve the requested end date string (e.g. '2026-07-24')
@@ -404,11 +437,16 @@ def _run_lean(params: dict):
             cmd.extend(["--data-provider-historical", "QuantConnect", "--data-downloader", "QuantConnect"])
 
 
-        # Pass UTF-8 through to the subprocess so LEAN logs are readable
+        # Pass UTF-8 and low-RAM .NET Workstation GC settings to the subprocess
         env = {
             **os.environ,
             "PYTHONUNBUFFERED": "1",
             "PYTHONIOENCODING": "utf-8",
+            "DOTNET_gcServer": "0",
+            "DOTNET_GCHeapHardLimit": "0x16000000",
+            "DOTNET_GCHighMemPercent": "75",
+            "LEAN_SKIP_MATPLOTLIB": "1",
+            "LEAN_SKIP_RESEARCH": "1",
         }
         py_dll = _get_python_dll()
         if py_dll:
@@ -428,6 +466,8 @@ def _run_lean(params: dict):
             text=False,
             env=env,
         )
+        with _lock:
+            _active_proc = proc
 
         # 3. Stream stdout line by line (decode as UTF-8, replace bad bytes)
         trade_log = []
@@ -462,6 +502,18 @@ def _run_lean(params: dict):
             _state["finished"] = datetime.now().isoformat()
         _log(f"[ERROR] {exc}")
         raise
+    finally:
+        if proc is not None:
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
+                pass
+            _terminate_proc(proc)
+        with _lock:
+            if _active_proc is proc:
+                _active_proc = None
+        gc.collect()
 
 
 # =============================================================================
@@ -611,6 +663,8 @@ def _log(line: str):
     """Append line to shared state log and print it safely to stdout."""
     with _lock:
         _state["log"].append(line)
+        if len(_state["log"]) > 250:
+            _state["log"] = _state["log"][-150:]
     # encode/decode round-trip strips any chars the terminal cannot display
     try:
         safe = line.encode("utf-8", errors="replace").decode("utf-8")

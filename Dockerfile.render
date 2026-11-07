@@ -8,14 +8,10 @@ FROM quantconnect/lean:foundation
 
 WORKDIR /app
 
-# 1. Copy backtest_ui first (for Docker layer caching on requirements)
-COPY backtest_ui/ /app/backtest_ui/
+# 1. Install Python dependencies for the Flask server first (cached layer)
+RUN pip install --no-cache-dir flask flask-cors yfinance pandas gunicorn
 
-# 2. Install Python dependencies for the Flask server
-RUN pip install --no-cache-dir flask flask-cors yfinance pandas
-
-# 3. Copy the rest of the project (algorithm, launcher, config, etc.)
-COPY Algorithm.Python/ /app/Algorithm.Python/
+# 2. Copy C# projects & data needed for compilation
 COPY Launcher/ /app/Launcher/
 COPY Data/ /app/Data/
 COPY Common/ /app/Common/
@@ -36,7 +32,7 @@ COPY Research/ /app/Research/
 COPY QuantConnect.Lean.sln LICENSE /app/
 COPY LocalPackages/ /app/LocalPackages/
 
-# 3b. Create a stub Algorithm.CSharp project to suppress MSB9008 warning
+# 2b. Create a stub Algorithm.CSharp project to suppress MSB9008 warning
 #     Engine.csproj references ../Algorithm.CSharp/QuantConnect.Algorithm.CSharp.csproj
 #     If it does not exist, MSBuild emits warning MSB9008 and may route the
 #     algorithm through the C# IL loader instead of the Python loader (LL-15).
@@ -44,10 +40,13 @@ RUN mkdir -p /app/Algorithm.CSharp && \
     printf '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath><AssemblyName>QuantConnect.Algorithm.CSharp</AssemblyName></PropertyGroup><ItemGroup><ProjectReference Include="../Algorithm.Framework/QuantConnect.Algorithm.Framework.csproj" /></ItemGroup></Project>' \
     > /app/Algorithm.CSharp/QuantConnect.Algorithm.CSharp.csproj
 
-# 4. Restore, build the LEAN Launcher project, and clean intermediate build caches
-#    in a SINGLE layer to avoid exhausting Render BuildKit disk space during image export.
+# 3. Restore, build the LEAN Launcher project (with Workstation GC & analyzers disabled),
+#    and clean intermediate build caches in a SINGLE layer.
 RUN dotnet restore Launcher/QuantConnect.Lean.Launcher.csproj && \
-    dotnet build Launcher/QuantConnect.Lean.Launcher.csproj -c Debug --no-restore -p:DebugType=none -p:DebugSymbols=false && \
+    dotnet build Launcher/QuantConnect.Lean.Launcher.csproj -c Debug --no-restore \
+        -p:DebugType=none -p:DebugSymbols=false \
+        -p:ServerGarbageCollection=false \
+        -p:RunAnalyzers=false -p:RunAnalyzersDuringBuild=false -p:AnalysisMode=None -v q -nologo && \
     cp -f /app/Common/AlgorithmImports.py /app/Launcher/bin/Debug/AlgorithmImports.py && \
     dotnet nuget locals all --clear && \
     rm -rf /root/.nuget /tmp/* /app/*/obj && \
@@ -55,7 +54,7 @@ RUN dotnet restore Launcher/QuantConnect.Lean.Launcher.csproj && \
     find /app/Launcher/bin -name "*.pdb" -delete && \
     rm -rf /app/Data/option /app/Data/future /app/Data/forex /app/Data/cfd /app/Data/futureoption /app/Data/equity/usa/tick /app/Data/equity/usa/second /app/Data/equity/usa/fundamental
 
-# 4b. Verify the pre-built DLLs and AlgorithmImports.py exist (fails the image build early if missing)
+# 3b. Verify the pre-built DLLs and AlgorithmImports.py exist (fails the image build early if missing)
 RUN echo "=== LEAN Launcher Build Artifacts ===" && \
     ls -lh /app/Launcher/bin/Debug/QuantConnect.*.dll /app/Launcher/bin/Debug/AlgorithmImports.py && \
     test -f /app/Launcher/bin/Debug/QuantConnect.Lean.Launcher.dll && \
@@ -63,11 +62,11 @@ RUN echo "=== LEAN Launcher Build Artifacts ===" && \
     test -f /app/Launcher/bin/Debug/QuantConnect.Algorithm.Framework.dll || \
     (echo "ERROR: Required LEAN DLLs not found after build!" && exit 1)
 
-# 4c. Pre-warm ticker cache (LL-16)
-#     Docker build uses ephemeral builder IPs (not the persistent Render service
-#     IP), so Yahoo Finance rate-limiting is far less likely during image build.
-#     Baking ZIPs into the image means the first backtest needs no network call.
-#     Failures for individual tickers are non-fatal (logged as WARN).
+# 4. Pre-warm ticker cache (LL-16)
+#    Docker build uses ephemeral builder IPs (not the persistent Render service
+#    IP), so Yahoo Finance rate-limiting is far less likely during image build.
+#    Baking ZIPs into the image means the first backtest needs no network call.
+#    Failures for individual tickers are non-fatal (logged as WARN).
 RUN python3 - <<'PYEOF'
 import yfinance as yf, zipfile, pathlib, sys
 
@@ -101,11 +100,20 @@ for ticker in tickers:
         print(f'WARN: {ticker} failed: {e}', file=sys.stderr)
 PYEOF
 
-# 5. Render injects PORT at runtime; default to 5000 for local testing
-ENV PORT=5000
+# 5. Copy Python strategies and Web UI LAST so edits to Python/UI skip C# compilation
+COPY Algorithm.Python/ /app/Algorithm.Python/
+COPY backtest_ui/ /app/backtest_ui/
+
+# 6. Runtime environment: Workstation GC + heap cap for 512MB Render containers
+ENV PORT=5000 \
+    DOTNET_gcServer=0 \
+    DOTNET_GCHeapHardLimit=0x16000000 \
+    DOTNET_GCHighMemPercent=75 \
+    LEAN_SKIP_MATPLOTLIB=1 \
+    LEAN_SKIP_RESEARCH=1
 EXPOSE 5000
 
-# 6. Launch the Flask server via production gunicorn WSGI server
+# 7. Launch the Flask server via Gunicorn (1 worker for shared _state & low RAM, 8 threads, 300s timeout)
 WORKDIR /app
-CMD ["sh", "-c", "gunicorn --workers 2 --threads 4 --bind 0.0.0.0:${PORT:-5000} backtest_ui.server:app"]
+CMD ["sh", "-c", "gunicorn --workers 1 --threads 8 --timeout 300 --graceful-timeout 30 --bind 0.0.0.0:${PORT:-5000} backtest_ui.server:app"]
 

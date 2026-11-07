@@ -179,5 +179,75 @@ This triggered a 2-step cascade failure:
 2. Disabled `.pdb` symbol generation (`-p:DebugType=none -p:DebugSymbols=false`) and chained cleanup commands (`dotnet nuget locals all --clear`, `rm -rf /root/.nuget /app/*/obj`, and removing all subproject `bin/` directories except `/app/Launcher/bin`) **within the same `RUN` instruction** as `dotnet build`.
 **Lesson:** In multi-project .NET Docker builds on cloud PaaS builders with strict disk quotas, always purge NuGet caches, `obj/` directories, and duplicate subproject `bin/` directories within the **same** `RUN` layer as `dotnet build`—deleting files in a subsequent `RUN` instruction does not shrink the previous layer's tar diff.
 
+## LL-25: Render Deployment Duration Breakdown & Optimization Roadmap (~11.5 Min Total)
+**Problem:** Although the Render.com deployment succeeded and the service went live, the end-to-end deployment duration took ~11 minutes 36 seconds (`17:31:30Z` to `17:43:06Z`), which is too slow for rapid iteration.
+**Timeline & Root Cause Analysis (from Render Build & Deploy Logs):**
+1. **Phase 1 — Docker Layer Copy & Setup (`~1s`):** Steps `#1`–`#31` completed almost instantaneously via BuildKit cache and `.dockerignore` filtering.
+2. **Phase 2 — C# Compilation & Roslyn Code Analyzers (`74.7s`, `17:31:30Z` → `17:32:45Z`):**
+   - Step `#32` (`dotnet restore && dotnet build`) took `74.7s` (`60.39s` inside MSBuild).
+   - MSBuild evaluated **3,150 Roslyn code-analysis warnings** (`CA2000`, `CA1031`, `CA1810`, `CA1822`, `CA1307`, etc.) across all LEAN projects because `<AnalysisMode>AllEnabledByDefault</AnalysisMode>` is active in the `.csproj` files, overflowing Render's 2 MiB build log buffer (`[output clipped, log limit 2MiB reached]`).
+3. **Phase 3 — Ticker Pre-Warm & Image Registry Push (`15.5s`, `17:32:45Z` → `17:32:55Z`):**
+   - Step `#34` (`ticker_cache.py`) took `3.9s`; `#36` (`exporting to image` & `pushing layers`) took `5.2s`; `#37` (`sending cache export`) took `6.0s`.
+4. **Phase 4 — Render Runtime Node Image Pull & Extraction (`9m 14s`, `17:33:06Z` → `17:42:20Z` — 80% of Total Time):**
+   - Between `==> Deploying...` (`17:33:06Z`) and `Starting gunicorn 23.0.0` (`17:42:20Z`), **9 minutes and 14 seconds** elapsed with no log output.
+   - **Root cause:** `Dockerfile.render` uses `FROM quantconnect/lean:foundation` as both its build and runtime image. `quantconnect/lean:foundation` is a massive **~5.5+ GB** monolithic image (containing Miniconda, C++/Boost, Java, R, Julia, .NET SDKs, and hundreds of thousands of files/inodes). When Render transitions from the Build Node to the Runtime Host Node at `==> Deploying...`, the Runtime Host must pull and extract this multi-gigabyte image onto containerd's overlayfs before starting the container.
+5. **Phase 5 — Cold-Start Assembly Scan on First Backtest (`13.4s`, `17:42:52Z` → `17:43:06Z`):**
+   - `Composer(): Loading Assemblies from /app/Launcher/bin/Debug/` took `13.4s` on the first run due to cold disk I/O scanning 100+ DLLs in `Launcher/bin/Debug/`.
 
+**Actionable Optimization Ideas (For Future Implementation) — Trade-Off Analysis (Pros & Cons):**
+
+1. **Idea 1: Reorder `Dockerfile.render` Layers so Python/UI Edits Skip `dotnet build`**
+   - **Mechanism:** Place `COPY backtest_ui/` and `COPY Algorithm.Python/` **after** `RUN dotnet restore && dotnet build`.
+   - **Pros:**
+     - **Massive Time Savings on Daily Iterations:** Whenever only Python strategies (`MultiSignalStrategy.py`), server logic (`server.py`), or HTML/JS are committed, BuildKit reuses the cached C# layer. Build time drops from ~75s to **0s** for the C# compile step.
+     - **Zero Risk / Pure Docker Layering:** Does not alter compiler settings, runtime binaries, or system packages.
+     - **Extremely Low Implementation Effort:** Only requires moving 2 lines down in `Dockerfile.render`.
+   - **Cons:**
+     - **No Impact on Initial or C# Changes:** If a C# file or project file is modified, the full ~75s build must still run.
+     - **Does Not Shrink the Image:** Does not reduce the 9m 14s runtime node image pull/unpack phase.
+
+2. **Idea 2: Disable Roslyn Code Analyzers During Docker Build**
+   - **Mechanism:** Pass `-p:RunAnalyzers=false -p:RunAnalyzersDuringBuild=false -p:AnalysisMode=None -v q -nologo` to `dotnet build`.
+   - **Pros:**
+     - **Faster Compilation (~40–50% drop in build time):** Eliminates evaluating 3,150 static analysis rules (`CA2000`, `CA1031`, etc.), reducing MSBuild CPU time from ~60s to ~30–35s.
+     - **Clean Build Logs:** Prevents hitting Render's 2 MiB log buffer cap (`[output clipped, log limit 2MiB reached]`), allowing actual compilation errors (if any) to remain visible.
+     - **Very Low Implementation Effort:** Single-line argument addition in `Dockerfile.render`.
+   - **Cons:**
+     - **Bypasses Code Quality Warnings in Docker:** Code quality/style issues won't be flagged during container build (though local IDE/developer builds still catch them).
+     - **Does Not Shrink the Image:** Does not affect the 9m 14s runtime pull/unpack phase.
+
+3. **Idea 3: Multi-Stage Docker Build with a Slim Runtime Image (`mcr.microsoft.com/dotnet/runtime:10.0-noble`)**
+   - **Mechanism:** Build C# in Stage 1 (`quantconnect/lean:foundation`), then copy only `/app/Launcher/bin/Debug/`, Python files, Data, and UI into a slim .NET runtime + Python 3.11 base (~450 MB).
+   - **Pros:**
+     - **Solves the 80% Bottleneck (Cuts Deploy Time by ~8 to 9 Minutes):** Shrinks the container image from ~5.5 GB to ~450 MB. Render's `==> Deploying...` phase drops from **9m 14s down to ~30–45s**.
+     - **Drastically Reduced Memory & Disk Footprint:** Eliminates gigabytes of unused SDKs, Java/R/Julia runtimes, and Boost libraries from the container filesystem.
+     - **Faster Cold Starts:** Quicker container spin-up and less memory overhead on Render's shared tier.
+   - **Cons:**
+     - **Highest Implementation Effort & Verification Risk:** Must precisely configure the runtime stage with the exact shared native dependencies (`libpython3.11.so`, `pythonnet`, C-runtime libraries) that QuantConnect LEAN relies on. Any missing `.so` dependency could cause runtime errors that require testing.
+     - **Initial Build is Slightly Slower:** First build must install Python packages in the slim stage (mitigated by Docker layer caching thereafter).
+
+4. **Idea 4: Strip C# Source Folders Post-Build (Single-Stage Cleanup)**
+   - **Mechanism:** Add `rm -rf /app/Engine /app/Brokerages /app/Indicators /app/Algorithm /app/Algorithm.Framework /app/AlgorithmFactory /app/Api /app/Compression /app/Configuration /app/DownloaderDataProvider /app/Logging /app/Messaging /app/Queues /app/Research` at the end of the `RUN dotnet build` layer.
+   - **Pros:**
+     - **Quick Image Slimming:** Deletes ~150 MB of source `.cs` files and tens of thousands of file inodes before layer export.
+     - **Faster Layer Compression & Extraction:** Fewer files for containerd to unpack during deploy.
+     - **Zero Runtime Risk for C#:** The compiled binaries in `/app/Launcher/bin/Debug/` already contain all IL code; source files are never read by the engine.
+   - **Cons:**
+     - **Moderate Impact Only:** Does not remove the underlying foundation OS bloat (~5 GB), so deploy phase might only drop by ~30–60s rather than 8+ minutes.
+     - **Must Preserve `Common/AlgorithmImports.py`:** Cleanup script must carefully avoid deleting `AlgorithmImports.py`.
+
+## LL-26: Gunicorn `WORKER TIMEOUT`, Multi-Worker State Desynchronization, & `.NET` Server GC OOM Crash on Render
+**Problem:** After running 3–4 sequential stock backtests on Render (`GOOG`, `KCE.BK`, `IVL.BK`, `BBL.BK`), the web dashboard stopped responding. Render logs showed:
+1. `[CRITICAL] WORKER TIMEOUT (pid:9)` followed by `Worker (pid:9) was sent SIGKILL! Perhaps out of memory?` during `IVL.BK`.
+2. `Isolator.ExecuteWithTimeLimit(): Used: 58, Sample: 91, App: 766` followed by `==> Instance ... restarted` during `BBL.BK`.
+**Root cause:**
+1. **Gunicorn 30s Default Worker Timeout:** `Dockerfile.render` ran `gunicorn --workers 2 --threads 4` without `--timeout`. When a 6-year daily backtest + indicator warmup saturated Render's shared vCPU for >30s, the worker missed its heartbeat ping to the Gunicorn master and was killed via `SIGKILL`.
+2. **Multi-Worker In-Memory State Desync (`--workers 2`):** `_state` in `backtest_ui/server.py` is an in-process Python dictionary. With 2 OS workers (`pid 8` and `pid 9`), `POST /api/run-backtest` mutated `_state` in one worker while half of the browser's 1-second `GET /api/status` polls hit the other idle worker—and also doubled the Flask/Pandas memory footprint (~240 MB).
+3. **`.NET` Server GC (`<ServerGarbageCollection>true</ServerGarbageCollection>`) & Unneeded Matplotlib Import:** `Launcher/QuantConnect.Lean.Launcher.csproj` sets `<ServerGarbageCollection>true</ServerGarbageCollection>`, causing `.NET 10.0` to reserve ~766 MB of heap memory (`App: 766`) and hold onto it instead of returning pages to the OS. Combined with two Gunicorn workers and `import matplotlib.pyplot as plt` in `AlgorithmImports.py`, total container memory exceeded Render's 512 MB cgroup limit and triggered the Linux OOM killer.
+**Fix:**
+1. Changed Gunicorn command in `Dockerfile.render` to `--workers 1 --threads 8 --timeout 300 --graceful-timeout 30` (1 shared-memory worker process, 8 concurrent threads, 5-minute timeout).
+2. Compiled `Launcher` with `-p:ServerGarbageCollection=false` and set `DOTNET_gcServer=0`, `DOTNET_GCHeapHardLimit=0x16000000` (~350 MB cap), and `DOTNET_GCHighMemPercent=75` in both `Dockerfile.render` and `server.py`.
+3. Guarded `import matplotlib.pyplot as plt` and `from QuantConnect.Research import *` in `Common/AlgorithmImports.py` behind `LEAN_SKIP_MATPLOTLIB=1` / `LEAN_SKIP_RESEARCH=1` environment variables (saving ~60 MB RAM and ~15–20s per backtest import).
+4. Added `_active_proc` tracking with `try ... finally` process termination (`_terminate_proc`), explicit `gc.collect()` after `yfinance` downloads and backtest runs, and bounded `_state["log"]` in `backtest_ui/server.py`.
+**Lesson:** Never use multi-process Gunicorn (`--workers > 1`) when job state is stored in a Python process global dictionary or on 512 MB containers; use `--workers 1 --threads N --timeout 300`. Always disable `.NET` `ServerGarbageCollection` (`DOTNET_gcServer=0`) in memory-constrained containers.
 

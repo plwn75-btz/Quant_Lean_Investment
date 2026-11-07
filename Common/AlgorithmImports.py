@@ -26,7 +26,7 @@ AddReference("System")
 
 # Load assemblies from current file's directory AND fallback build output directories
 _project_root = os.path.dirname(path)
-_dll_search_dirs = [path]
+_dll_search_dirs = [os.path.realpath(path)]
 for _candidate in (
     os.path.join(_project_root, "Launcher", "bin", "Debug"),
     os.path.join(_project_root, "Launcher", "bin", "Release"),
@@ -34,13 +34,17 @@ for _candidate in (
     os.path.join(os.getcwd(), "bin", "Release"),
     os.getcwd(),
 ):
-    if os.path.isdir(_candidate) and _candidate not in _dll_search_dirs:
-        _dll_search_dirs.append(_candidate)
+    if os.path.isdir(_candidate):
+        _real = os.path.realpath(_candidate)
+        if _real not in _dll_search_dirs:
+            _dll_search_dirs.append(_real)
 
 for _d in _dll_search_dirs:
     try:
         _dll_files = [f for f in os.listdir(_d) if f.endswith(".dll") and f.startswith("QuantConnect.")]
-        if _dll_files and _d not in sys.path:
+        if not _dll_files:
+            continue
+        if _d not in sys.path:
             sys.path.append(_d)
         for file in _dll_files:
             try:
@@ -50,6 +54,7 @@ for _d in _dll_search_dirs:
                     AddReference(os.path.join(_d, file))
                 except Exception:
                     pass
+        break  # Stop after loading from the primary build directory
     except Exception:
         pass
 
@@ -63,10 +68,11 @@ from QuantConnect.Data import *
 from QuantConnect.Orders import *
 from QuantConnect.Python import *
 from QuantConnect.Storage import *
-try:
-    from QuantConnect.Research import *
-except ImportError:
-    pass
+if not os.environ.get("LEAN_SKIP_RESEARCH"):
+    try:
+        from QuantConnect.Research import *
+    except ImportError:
+        pass
 from QuantConnect.Commands import *
 from QuantConnect.Algorithm import *
 from QuantConnect.Statistics import *
@@ -120,7 +126,8 @@ from QuantConnect.Indicators.CandlestickPatterns import *
 try:
     import numpy as np
     import pandas as pd
-    import matplotlib.pyplot as plt
+    if not os.environ.get("LEAN_SKIP_MATPLOTLIB"):
+        import matplotlib.pyplot as plt
 except:
     pass
 
