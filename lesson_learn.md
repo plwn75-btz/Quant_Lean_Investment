@@ -168,4 +168,16 @@ This triggered a 2-step cascade failure:
 3. Updated `server.py` `_patch_config()` to place `dll_dir` (`Launcher/bin/Debug`) **last** in `python-additional-paths` (so `PythonInitializer.cs`'s `sys.path.insert(0, ...)` places it **first** in `sys.path`) and automatically sync `Common/AlgorithmImports.py` into `dll_dir`.
 **Lesson:** When a C# host injects Python paths via sequential `sys.path.insert(0, p)`, the last item in the config list wins highest priority in `sys.path`. Furthermore, any script that dynamically loads CLR assemblies via `os.listdir(os.path.dirname(__file__))` must always resolve from the compiled binary output directory (`bin/Debug`), never from the C# source directory (`Common/`).
 
+## LL-24: Render BuildKit Disk Exhaustion (`no space left on device` During Image Export)
+**Problem:** During the Render.com Docker build, all compilation and ticker caching steps (`#35`–`#38`) succeeded, but the final step (`#39 exporting to image`) failed with `ResourceExhausted: ... write /var/lib/buildkit-root/.../data: no space left on device` while archiving `/app/Data/forex/fxcm/second/eurusd/20140508_quote.zip`.
+**Root cause:**
+1. Compiling 15+ LEAN `.csproj` projects populates `/root/.nuget/packages/` (~1.5 GB), intermediate `/app/*/obj/` (~600 MB), and duplicate `/app/<subproject>/bin/` output folders (~900 MB) inside the `RUN dotnet restore && dotnet build` layer.
+2. Copying the entire `Data/` directory included ~215 MB of unused sample tick/forex/option/future/cfd archives.
+3. When BuildKit exports the image layers into a compressed diff tar stream at the end of the build, the combined layer size exceeded the ephemeral builder's disk quota.
+**Fix:**
+1. Updated `.dockerignore` and `Dockerfile.render` to exclude unused non-equity/high-frequency sample datasets (`Data/option`, `Data/future`, `Data/forex`, `Data/cfd`, `Data/equity/usa/tick`, etc.) and unreferenced heavy projects (`Optimizer`, `Optimizer.Launcher`, `ToolBox`).
+2. Disabled `.pdb` symbol generation (`-p:DebugType=none -p:DebugSymbols=false`) and chained cleanup commands (`dotnet nuget locals all --clear`, `rm -rf /root/.nuget /app/*/obj`, and removing all subproject `bin/` directories except `/app/Launcher/bin`) **within the same `RUN` instruction** as `dotnet build`.
+**Lesson:** In multi-project .NET Docker builds on cloud PaaS builders with strict disk quotas, always purge NuGet caches, `obj/` directories, and duplicate subproject `bin/` directories within the **same** `RUN` layer as `dotnet build`—deleting files in a subsequent `RUN` instruction does not shrink the previous layer's tar diff.
+
+
 

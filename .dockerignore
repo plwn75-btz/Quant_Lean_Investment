@@ -5,8 +5,27 @@ packages/*
 .vs/*
 .nuget/*
 Tests/*
+Documentation/*
+Report/*
+Optimizer/*
+Optimizer.Launcher/*
+ToolBox/*
+Algorithm.CSharp/*
 .devcontainer/*
 .vscode/*
+*.bak
+*_bak.*
+dotnet-install.ps1
+
+# Ignore unused heavy sample market data (~215 MB) to prevent Render BuildKit disk exhaustion
+Data/option/*
+Data/future/*
+Data/forex/*
+Data/cfd/*
+Data/futureoption/*
+Data/equity/usa/tick/*
+Data/equity/usa/second/*
+Data/equity/usa/fundamental/*
 
 # Ignore LEAN C# build artifacts (we compile from source inside the container)
 */obj/*
