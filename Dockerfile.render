@@ -1,19 +1,22 @@
 # ══════════════════════════════════════════════════════════════════════════
 # Dockerfile.render — Quant-LEAN Engineering Dashboard for Render.com
 # ══════════════════════════════════════════════════════════════════════════
-# Uses QuantConnect's official foundation image (includes .NET SDK + Python)
+# Multi-stage build:
+#   Stage 1 (builder): Official .NET 10.0 SDK compiles LEAN Launcher DLLs
+#   Stage 2 (runtime): Slim .NET 10.0 Runtime + Miniconda Python 3.11 (~450 MB
+#                      vs ~15 GB in quantconnect/lean:foundation), cutting
+#                      Render deployment & image extraction from ~24m to ~2m.
 # ══════════════════════════════════════════════════════════════════════════
 
-FROM quantconnect/lean:foundation
+# ──────────────────────────────────────────────────────────────────────────
+# STAGE 1: C# Builder
+# ──────────────────────────────────────────────────────────────────────────
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS builder
 
 WORKDIR /app
 
-# 1. Install Python dependencies for the Flask server first (cached layer)
-RUN pip install --no-cache-dir flask flask-cors yfinance pandas gunicorn
-
-# 2. Copy C# projects & data needed for compilation
+# 1. Copy C# projects needed for compilation
 COPY Launcher/ /app/Launcher/
-COPY Data/ /app/Data/
 COPY Common/ /app/Common/
 COPY Engine/ /app/Engine/
 COPY Algorithm/ /app/Algorithm/
@@ -32,29 +35,24 @@ COPY Research/ /app/Research/
 COPY QuantConnect.Lean.sln LICENSE /app/
 COPY LocalPackages/ /app/LocalPackages/
 
-# 2b. Create a stub Algorithm.CSharp project to suppress MSB9008 warning
-#     Engine.csproj references ../Algorithm.CSharp/QuantConnect.Algorithm.CSharp.csproj
-#     If it does not exist, MSBuild emits warning MSB9008 and may route the
-#     algorithm through the C# IL loader instead of the Python loader (LL-15).
+# 2. Create stub Algorithm.CSharp project to suppress MSB9008 warning (LL-15)
 RUN mkdir -p /app/Algorithm.CSharp && \
     printf '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath><AssemblyName>QuantConnect.Algorithm.CSharp</AssemblyName></PropertyGroup><ItemGroup><ProjectReference Include="../Algorithm.Framework/QuantConnect.Algorithm.Framework.csproj" /></ItemGroup></Project>' \
     > /app/Algorithm.CSharp/QuantConnect.Algorithm.CSharp.csproj
 
-# 3. Restore, build the LEAN Launcher project (with Workstation GC & analyzers disabled),
-#    and clean intermediate build caches in a SINGLE layer.
+# 3. Restore and build LEAN Launcher (Workstation GC, no PDBs, no analyzers/XML docs)
 RUN dotnet restore Launcher/QuantConnect.Lean.Launcher.csproj && \
     dotnet build Launcher/QuantConnect.Lean.Launcher.csproj -c Debug --no-restore \
         -p:DebugType=none -p:DebugSymbols=false \
         -p:ServerGarbageCollection=false \
-        -p:RunAnalyzers=false -p:RunAnalyzersDuringBuild=false -p:AnalysisMode=None -v q -nologo && \
+        -p:GenerateDocumentationFile=false \
+        -p:RunAnalyzers=false -p:RunAnalyzersDuringBuild=false -p:AnalysisMode=None \
+        -nowarn:CS1591,CS8603,CS8622,MSB9008,NETSDK1206 -v q -nologo && \
     cp -f /app/Common/AlgorithmImports.py /app/Launcher/bin/Debug/AlgorithmImports.py && \
-    dotnet nuget locals all --clear && \
-    rm -rf /root/.nuget /tmp/* /app/*/obj && \
-    find /app -mindepth 2 -maxdepth 2 -type d -name "bin" ! -path "/app/Launcher/bin" -exec rm -rf {} + && \
-    find /app/Launcher/bin -name "*.pdb" -delete && \
-    rm -rf /app/Data/option /app/Data/future /app/Data/forex /app/Data/cfd /app/Data/futureoption /app/Data/equity/usa/tick /app/Data/equity/usa/second /app/Data/equity/usa/fundamental
+    cp -f /app/Common/PandasMapper.py /app/Launcher/bin/Debug/PandasMapper.py && \
+    find /app/Launcher/bin -name "*.pdb" -delete
 
-# 3b. Verify the pre-built DLLs and AlgorithmImports.py exist (fails the image build early if missing)
+# 3b. Verify required LEAN DLLs exist
 RUN echo "=== LEAN Launcher Build Artifacts ===" && \
     ls -lh /app/Launcher/bin/Debug/QuantConnect.*.dll /app/Launcher/bin/Debug/AlgorithmImports.py && \
     test -f /app/Launcher/bin/Debug/QuantConnect.Lean.Launcher.dll && \
@@ -62,12 +60,44 @@ RUN echo "=== LEAN Launcher Build Artifacts ===" && \
     test -f /app/Launcher/bin/Debug/QuantConnect.Algorithm.Framework.dll || \
     (echo "ERROR: Required LEAN DLLs not found after build!" && exit 1)
 
-# 4. Pre-warm ticker cache (LL-16)
-#    Docker build uses ephemeral builder IPs (not the persistent Render service
-#    IP), so Yahoo Finance rate-limiting is far less likely during image build.
-#    Baking ZIPs into the image means the first backtest needs no network call.
-#    Failures for individual tickers are non-fatal (logged as WARN).
-RUN python3 - <<'PYEOF'
+
+# ──────────────────────────────────────────────────────────────────────────
+# STAGE 2: Slim Production Runtime (.NET 10.0 Runtime + Miniconda Python 3.11)
+# ──────────────────────────────────────────────────────────────────────────
+FROM mcr.microsoft.com/dotnet/runtime:10.0-noble
+
+WORKDIR /app
+
+ENV CONDA="Miniconda3-py311_24.9.2-0-Linux-x86_64.sh" \
+    PATH="/opt/miniconda3/bin:${PATH}" \
+    PYTHONNET_PYDLL="/opt/miniconda3/lib/libpython3.11.so"
+
+# 1. Install minimal OS libraries + Miniconda Python 3.11 + required Python packages
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        wget curl ca-certificates bzip2 zlib1g libglib2.0-0 libgomp1 libstdc++6 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* && \
+    (wget -q https://cdn.quantconnect.com/miniconda/${CONDA} || \
+     wget -q https://repo.anaconda.com/miniconda/${CONDA}) && \
+    bash ${CONDA} -b -p /opt/miniconda3 && \
+    rm -f ${CONDA} && \
+    /opt/miniconda3/bin/conda clean -y --all && \
+    rm -rf /opt/miniconda3/pkgs/* && \
+    pip install --no-cache-dir \
+        numpy==1.26.4 \
+        pandas==2.3.3 \
+        scipy==1.13.1 \
+        wrapt==1.17.3 \
+        flask \
+        flask-cors \
+        yfinance \
+        gunicorn && \
+    test -f /opt/miniconda3/lib/libpython3.11.so
+
+# 2. Copy base Data directory and pre-warm ticker cache (LL-16)
+COPY Data/ /app/Data/
+RUN rm -rf /app/Data/option /app/Data/future /app/Data/forex /app/Data/cfd /app/Data/futureoption /app/Data/equity/usa/tick /app/Data/equity/usa/second /app/Data/equity/usa/fundamental && \
+    python3 - <<'PYEOF'
 import yfinance as yf, zipfile, pathlib, sys
 
 tickers = ['GOOG', 'AAPL', 'AOT.BK', 'PTT.BK', 'SCB.BK', 'KBANK.BK']
@@ -100,20 +130,24 @@ for ticker in tickers:
         print(f'WARN: {ticker} failed: {e}', file=sys.stderr)
 PYEOF
 
-# 5. Copy Python strategies and Web UI LAST so edits to Python/UI skip C# compilation
+# 3. Copy compiled LEAN Launcher artifacts from Stage 1
+COPY --from=builder /app/Launcher /app/Launcher
+COPY Common/AlgorithmImports.py Common/PandasMapper.py /app/Common/
+
+# 4. Copy Python strategies and Web UI LAST (instant cached rebuilds on code changes)
 COPY Algorithm.Python/ /app/Algorithm.Python/
 COPY backtest_ui/ /app/backtest_ui/
 
-# 6. Runtime environment: Workstation GC + heap cap for 512MB Render containers
-ENV PORT=5000 \
+# 5. Runtime environment: Match Render's default PORT=10000 so port scan succeeds immediately
+ENV PORT=10000 \
     DOTNET_gcServer=0 \
     DOTNET_GCHeapHardLimit=0x16000000 \
     DOTNET_GCHighMemPercent=75 \
     LEAN_SKIP_MATPLOTLIB=1 \
     LEAN_SKIP_RESEARCH=1
-EXPOSE 5000
+EXPOSE 10000
 
-# 7. Launch the Flask server via Gunicorn (1 worker for shared _state & low RAM, 8 threads, 300s timeout)
+# 6. Launch Flask via Gunicorn (--preload binds & loads app immediately for fast port detection)
 WORKDIR /app
-CMD ["sh", "-c", "gunicorn --workers 1 --threads 8 --timeout 300 --graceful-timeout 30 --bind 0.0.0.0:${PORT:-5000} backtest_ui.server:app"]
+CMD ["sh", "-c", "gunicorn --preload --workers 1 --threads 8 --timeout 300 --graceful-timeout 30 --bind 0.0.0.0:${PORT:-10000} backtest_ui.server:app"]
 

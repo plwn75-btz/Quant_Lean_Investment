@@ -612,14 +612,15 @@ def _patch_config(params: dict):
         dll_dir_path = Path(dll_path).parent.resolve()
         dll_dir = str(dll_dir_path).replace("\\", "/")
         candidate_dirs.append(dll_dir)
-        # Ensure the latest resilient AlgorithmImports.py is present in dll_dir
-        src_imports = PROJECT_DIR / "Common" / "AlgorithmImports.py"
-        dst_imports = dll_dir_path / "AlgorithmImports.py"
-        if src_imports.exists():
-            try:
-                shutil.copyfile(src_imports, dst_imports)
-            except Exception:
-                pass
+        # Ensure the latest resilient AlgorithmImports.py and PandasMapper.py are present in dll_dir
+        for py_helper in ("AlgorithmImports.py", "PandasMapper.py"):
+            src_helper = PROJECT_DIR / "Common" / py_helper
+            dst_helper = dll_dir_path / py_helper
+            if src_helper.exists():
+                try:
+                    shutil.copyfile(src_helper, dst_helper)
+                except Exception:
+                    pass
 
     ordered_paths = []
     for c_dir in candidate_dirs:
