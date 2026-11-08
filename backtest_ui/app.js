@@ -56,9 +56,40 @@ let _chart      = null;
 let _chartMode  = 'pnl';   // 'pnl' | 'bar'
 let _pollTimer  = null;
 let _lastLog    = 0;        // index into log array for incremental display
+window._lastTrades = null;
+
+// ── Theme Management (Day / Night) ─────────────────────────────────────────
+function initTheme() {
+  const saved = localStorage.getItem('quant_theme') || 'dark';
+  applyTheme(saved);
+  const btn = document.getElementById('theme-toggle');
+  if (btn) {
+    btn.addEventListener('click', toggleTheme);
+  }
+}
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('quant_theme', theme);
+  const lbl = document.getElementById('theme-label');
+  if (lbl) {
+    lbl.textContent = theme === 'light' ? 'Day' : 'Night';
+  }
+  // Re-render chart if active so axes and grids recolor nicely
+  if (window._lastTrades && window._lastTrades.length > 0) {
+    renderChart(window._lastTrades);
+  }
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme') || 'dark';
+  const next = current === 'light' ? 'dark' : 'light';
+  applyTheme(next);
+}
 
 // ── Init ──────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
+  initTheme();
   buildToggles('buy-toggles',  BUY_CONDITIONS,  'buy');
   buildToggles('sell-toggles', SELL_CONDITIONS, 'sell');
 
@@ -491,6 +522,7 @@ function fmt$(n) { return '$' + parseFloat(n || 0).toFixed(2); }
 
 // ── Chart rendering ────────────────────────────────────────────────────────
 function renderChart(trades) {
+  window._lastTrades = trades;
   if (!window._chartJsReady) { setTimeout(() => renderChart(trades), 200); return; }
 
   const canvas = document.getElementById('chart-main');
@@ -646,7 +678,20 @@ function renderChart(trades) {
 }
 
 
+function getThemeColors() {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  return {
+    textColor:     isLight ? '#334155' : '#8a9ab8',
+    gridColor:     isLight ? 'rgba(15, 23, 42, 0.08)' : 'rgba(255, 255, 255, 0.05)',
+    tooltipBg:     isLight ? '#ffffff' : '#131c2e',
+    tooltipBorder: isLight ? 'rgba(37, 99, 235, 0.25)' : 'rgba(59, 130, 246, 0.3)',
+    tooltipTitle:  isLight ? '#64748b' : '#8a9ab8',
+    tooltipBody:   isLight ? '#0f172a' : '#e8edf5',
+  };
+}
+
 function chartOptions(yLabel, hasArea) {
+  const theme = getThemeColors();
   return {
     responsive: true,
     maintainAspectRatio: false,
@@ -654,11 +699,11 @@ function chartOptions(yLabel, hasArea) {
     plugins: {
       legend: { display: false },
       tooltip: {
-        backgroundColor: '#131c2e',
-        borderColor: 'rgba(59,130,246,0.3)',
+        backgroundColor: theme.tooltipBg,
+        borderColor: theme.tooltipBorder,
         borderWidth: 1,
-        titleColor: '#8a9ab8',
-        bodyColor: '#e8edf5',
+        titleColor: theme.tooltipTitle,
+        bodyColor: theme.tooltipBody,
         padding: 10,
         callbacks: {
           label: ctx => ` ${ctx.raw >= 0 ? '+' : ''}${ctx.raw}%`,
@@ -667,9 +712,9 @@ function chartOptions(yLabel, hasArea) {
     },
     scales: {
       x: {
-        grid: { color: 'rgba(255,255,255,0.04)', drawBorder: false },
+        grid: { color: theme.gridColor, drawBorder: false },
         ticks: { 
-          color: '#8a9ab8', 
+          color: theme.textColor, 
           font: { size: 11, family: 'JetBrains Mono' }, 
           maxRotation: 35,
           autoSkip: true,
@@ -679,14 +724,14 @@ function chartOptions(yLabel, hasArea) {
       y: {
         beginAtZero: false,
         grace: '10%',
-        grid: { color: 'rgba(255,255,255,0.06)', drawBorder: false },
+        grid: { color: theme.gridColor, drawBorder: false },
         ticks: { 
-          color: '#8a9ab8', 
+          color: theme.textColor, 
           font: { size: 11, family: 'JetBrains Mono', weight: '500' },
           padding: 8,
           callback: v => (v >= 0 ? '+' : '') + Number(v).toFixed(1) + '%' 
         },
-        title: { display: true, text: yLabel, color: '#8a9ab8', font: { size: 12, weight: '600' } },
+        title: { display: true, text: yLabel, color: theme.textColor, font: { size: 12, weight: '600' } },
       },
     },
   };
@@ -694,6 +739,7 @@ function chartOptions(yLabel, hasArea) {
 
 // ── Buy/Sell Price chart helpers ──────────────────────────────────────────
 function chartOptionsPriceAxis(trades) {
+  const theme = getThemeColors();
   // Compute nice min/max for the price Y-axis
   const allPrices = trades.flatMap(t => [parseFloat(t.buy_price), parseFloat(t.sell_price)]);
   const minP = Math.min(...allPrices);
@@ -709,7 +755,7 @@ function chartOptionsPriceAxis(trades) {
         display: true,
         position: 'top',
         labels: {
-          color: '#8a9ab8',
+          color: theme.textColor,
           usePointStyle: true,
           pointStyleWidth: 14,
           font: { size: 11, family: 'JetBrains Mono' },
@@ -717,11 +763,11 @@ function chartOptionsPriceAxis(trades) {
         },
       },
       tooltip: {
-        backgroundColor: '#131c2e',
-        borderColor: 'rgba(59,130,246,0.3)',
+        backgroundColor: theme.tooltipBg,
+        borderColor: theme.tooltipBorder,
         borderWidth: 1,
-        titleColor: '#8a9ab8',
-        bodyColor: '#e8edf5',
+        titleColor: theme.tooltipTitle,
+        bodyColor: theme.tooltipBody,
         padding: 12,
         callbacks: {
           title: items => items[0]?.label ?? '',
@@ -745,9 +791,9 @@ function chartOptionsPriceAxis(trades) {
     },
     scales: {
       x: {
-        grid: { color: 'rgba(255,255,255,0.04)', drawBorder: false },
+        grid: { color: theme.gridColor, drawBorder: false },
         ticks: {
-          color: '#8a9ab8',
+          color: theme.textColor,
           font: { size: 11, family: 'JetBrains Mono' },
           maxRotation: 35,
           autoSkip: true,
@@ -757,9 +803,9 @@ function chartOptionsPriceAxis(trades) {
       y: {
         min: minP - pad,
         max: maxP + pad,
-        grid: { color: 'rgba(255,255,255,0.06)', drawBorder: false },
+        grid: { color: theme.gridColor, drawBorder: false },
         ticks: {
-          color: '#8a9ab8',
+          color: theme.textColor,
           font: { size: 11, family: 'JetBrains Mono', weight: '500' },
           padding: 8,
           callback: v => parseFloat(v).toFixed(2),
@@ -767,7 +813,7 @@ function chartOptionsPriceAxis(trades) {
         title: {
           display: true,
           text: 'Price',
-          color: '#8a9ab8',
+          color: theme.textColor,
           font: { size: 12, weight: '600' },
         },
       },
